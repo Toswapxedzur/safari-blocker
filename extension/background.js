@@ -2889,6 +2889,89 @@ async function broadcastCustomPanelRefresh(panelGroups = []) {
   );
 }
 
+// ── Dynamic site blocklist (ev.block / ev.unblock) ──────────────────────
+const __windowBlockedSites = new Set();
+
+function windowBlocklistNormalize(pattern) {
+  let s = String(pattern || "").trim().toLowerCase();
+  if (s.startsWith("http://")) s = s.slice(7);
+  if (s.startsWith("https://")) s = s.slice(8);
+  if (s.startsWith("www.")) s = s.slice(4);
+  const slashIdx = s.indexOf("/");
+  if (slashIdx > 0) s = s.slice(0, slashIdx);
+  return s;
+}
+
+function windowBlocklistMatches(url) {
+  if (__windowBlockedSites.size === 0) return false;
+  try {
+    let h = new URL(url).hostname.toLowerCase();
+    if (h.startsWith("www.")) h = h.slice(4);
+    for (const p of __windowBlockedSites) {
+      if (h === p || h.endsWith("." + p)) return true;
+    }
+  } catch {}
+  return false;
+}
+
+async function closeTabsMatchingBlocklist() {
+  if (__windowBlockedSites.size === 0) return;
+  try {
+    const api = (typeof browser !== "undefined" && browser.tabs) || chrome.tabs;
+    const tabs = await api.query({});
+    for (const tab of tabs) {
+      if (tab.url && windowBlocklistMatches(tab.url)) {
+        try { await api.remove(tab.id); } catch {}
+      }
+    }
+  } catch {}
+}
+
+async function processWindowIntents(intents, originTabId) {
+  const api = (typeof browser !== "undefined" && browser.tabs) || chrome.tabs;
+  for (const intent of intents) {
+    if (!intent) continue;
+    switch (intent.action) {
+      case "closeActiveTab":
+        if (typeof originTabId === "number") {
+          try { await api.remove(originTabId); } catch {}
+        }
+        break;
+      case "closeTab":
+        if (typeof intent.tabId === "number") {
+          try { await api.remove(intent.tabId); } catch {}
+        }
+        break;
+      case "closeTabByUrl": {
+        const url = String(intent.url || "");
+        if (!url) break;
+        try {
+          const tabs = await api.query({});
+          for (const tab of tabs) {
+            if (tab.url && tab.url.includes(url)) {
+              await api.remove(tab.id);
+            }
+          }
+        } catch {}
+        break;
+      }
+      case "blockSite": {
+        const p = windowBlocklistNormalize(intent.pattern);
+        if (p) {
+          __windowBlockedSites.add(p);
+          closeTabsMatchingBlocklist();
+        }
+        break;
+      }
+      case "unblockSite": {
+        const p = windowBlocklistNormalize(intent.pattern);
+        __windowBlockedSites.delete(p);
+        break;
+      }
+    }
+  }
+}
+
 async function applySandboxResultToTab(tabId, result, descriptor) {
   if (!result || typeof tabId !== "number") return;
   // Aggregate logs from the main dispatch + any synthResults (posted
@@ -2910,9 +2993,17 @@ async function applySandboxResultToTab(tabId, result, descriptor) {
       }
     }
   }
+
+  // Process window-level intents in the background (they require tabs API).
+  const windowIntents = intents.filter((i) => i && i.kind === "window");
+  const contentIntents = intents.filter((i) => !i || i.kind !== "window");
+  if (windowIntents.length > 0) {
+    processWindowIntents(windowIntents, tabId).catch(() => {});
+  }
+
   // Skip empty applies (they would only spam the per-tab queue with
   // ticks that have no observable side effect).
-  if (logs.length === 0 && domOps.length === 0 && intents.length === 0 &&
+  if (logs.length === 0 && domOps.length === 0 && contentIntents.length === 0 &&
       panelPayload.panels.length === 0 && panelPayload.groups.length === 0 &&
       !result.defaultPrevented && !result.redirectUrl &&
       typeof result.result !== "string") {
@@ -2925,7 +3016,7 @@ async function applySandboxResultToTab(tabId, result, descriptor) {
     result: result.result ?? null,
     redirectUrl: result.redirectUrl || "",
     domOps,
-    intents,
+    intents: contentIntents,
     panelSnapshots: panelPayload.panels,
     panelGroups: panelPayload.groups,
     logs
