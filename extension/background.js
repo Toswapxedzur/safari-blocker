@@ -156,6 +156,8 @@ function createDefaultGroup(groupType = DEFAULT_GROUP_TYPE) {
     freezeMode: "none",
     strictFreezeHours: DEFAULT_STRICT_FREEZE_HOURS,
     frozenAtMs: null,
+    parentalPasswordHash: null,
+    parentalPasswordSalt: null,
     sites: [],
     blockHomePage: false,
     fallbackUrl: "",
@@ -537,7 +539,9 @@ function sanitizeGroups(groups) {
             ? group.blockingRulesText.trim()
             : baseGroup.blockingRulesText,
         freezeMode:
-          group?.freezeMode === "strict" || group?.freezeMode === "frozen"
+          group?.freezeMode === "strict" ||
+          group?.freezeMode === "frozen" ||
+          group?.freezeMode === "parental"
             ? group.freezeMode
             : "none",
         strictFreezeHours:
@@ -545,6 +549,14 @@ function sanitizeGroups(groups) {
         frozenAtMs:
           Number.isFinite(Number(group?.frozenAtMs)) && Number(group.frozenAtMs) > 0
             ? Number(group.frozenAtMs)
+            : null,
+        parentalPasswordHash:
+          typeof group?.parentalPasswordHash === "string" && group.parentalPasswordHash
+            ? group.parentalPasswordHash
+            : null,
+        parentalPasswordSalt:
+          typeof group?.parentalPasswordSalt === "string" && group.parentalPasswordSalt
+            ? group.parentalPasswordSalt
             : null,
         sites: Array.isArray(group?.sites)
           ? [...new Set(group.sites.map(normalizeSiteInput).filter(Boolean))]
@@ -600,7 +612,9 @@ function sanitizeSnoozes(value, groups, now) {
     const confirmationCount = parseSnoozeConfirmations(snooze?.confirmationCount);
     const activeMsApplied = Boolean(snooze?.activeMsApplied);
     const refreezeMode =
-      snooze?.refreezeMode === "strict" || snooze?.refreezeMode === "frozen"
+      snooze?.refreezeMode === "strict" ||
+      snooze?.refreezeMode === "frozen" ||
+      snooze?.refreezeMode === "parental"
         ? snooze.refreezeMode
         : "frozen";
     if (
@@ -1339,7 +1353,10 @@ function applyRuntimeNormalizations(
       if (groupIndex >= 0 && nextGroups[groupIndex].freezeMode === "none") {
         nextGroups[groupIndex] = {
           ...nextGroups[groupIndex],
-          freezeMode: snooze.refreezeMode === "strict" ? "strict" : "frozen",
+          freezeMode:
+            snooze.refreezeMode === "strict" || snooze.refreezeMode === "parental"
+              ? snooze.refreezeMode
+              : "frozen",
           frozenAtMs: now
         };
       }
@@ -1676,6 +1693,9 @@ async function applyElapsedTime(pageContextInput, elapsedMs) {
 
   if (changed) {
     await chrome.storage.local.set({ [USAGE_TIMERS_KEY]: nextTimers });
+    // Report accrual to the hub so clustered Default groups keep one shared
+    // live budget even while this browser's popup is closed.
+    cbReportClusterUsage(relevantTimedGroups, nextTimers, usageResetAtMs);
   }
   if (reachedLimit) {
     await syncBlockingRules();
@@ -3472,4 +3492,586 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 ensureStartupGate().catch((error) => {
   console.error("[CustomBlocker] startup loader threw", error);
 });
+
+/* ------------------------------------------------------------------ *
+ * Web-app bridge — extension WebSocket client.
+ *
+ * The macOS app hosts the hub (a browser extension cannot listen on a
+ * socket). This client connects out to that hub over a fixed loopback
+ * address (no pairing code), and keeps a live status that the popup reads
+ * via the "connection-status" message (and live "connection-status-push"
+ * broadcasts while the popup is open).
+ *
+ * WebSocket activity keeps the MV3 service worker alive (Chrome 116+), so
+ * the connection survives popup open/close. We also send a periodic ping.
+ * ------------------------------------------------------------------ */
+const CB_CONNECTION_PROTOCOL_VERSION = 1;
+// Fixed loopback address for the macOS hub (port is no longer configurable).
+const CB_FIXED_ADDRESS = "ws://127.0.0.1:8787";
+const CB_CONNECTION_PING_MS = 20_000;
+// When (re)connecting we retry rapidly for a short window to catch a Mac server
+// that is just starting up. If nothing connects within the window we stop and
+// show "disconnected" until the user reconnects (or the SW retries on wake).
+const CB_CONNECTION_BURST_INTERVAL_MS = 100;
+const CB_CONNECTION_BURST_WINDOW_MS = 5_000;
+const CB_CONNECTION_SLOW_INTERVAL_MS = 5_000;
+
+// Scalar settings synced across a cluster (kept in sync with popup.js).
+const CB_SYNC_SCALAR_FIELDS = [
+  "mode",
+  "allowedMinutes",
+  "resetIntervalHours",
+  "allowSnooze",
+  "snoozeMinutes",
+  "snoozeActivationDelayMinutes",
+  "snoozeCooldownMinutes",
+  "snoozeConfirmations",
+  "activeDays",
+  "timeWindowsText",
+  "freezeMode",
+  "freezeModeChoice",
+  "strictFreezeHours",
+  "frozenAtMs",
+  "blockHomePage",
+  "fallbackUrl",
+  "skipToNextOnBlock"
+];
+
+function cbDetectProgramId() {
+  let ua = "";
+  try {
+    ua = (self.navigator && self.navigator.userAgent) || "";
+  } catch (_) {}
+  if (/\bEdg\//.test(ua)) return "edge";
+  if (/\bFirefox\//.test(ua)) return "firefox";
+  if (/\bOPR\//.test(ua) || /\bOpera\//.test(ua)) return "opera";
+  if (/\bChrome\//.test(ua)) return "chrome";
+  if (/\bSafari\//.test(ua)) return "safari";
+  return "browser";
+}
+
+// Per-group baseline (the last absolute local usage we reported or folded) so we
+// can report ONLY this endpoint's own accrual as a positive delta. It must be
+// rebased to the hub's shared total whenever we fold that total into local
+// storage (see applySharedToStorage), otherwise another member's contribution
+// would be re-reported as ours and double-count. `cbClusterUsageReset` tracks
+// the reset anchor we last reported so a window rollover is forwarded once.
+const cbClusterUsageBaseline = {};
+const cbClusterUsageReset = {};
+
+// Reports this endpoint's usage *increment* to the hub for any clustered Default
+// group so the one shared live budget keeps accumulating even while the popup is
+// closed. Sends a lightweight usage-only group-sync (no scalars/sites) carrying
+// the delta since our last report plus an absolute seed (used by the hub only
+// until the first real delta arrives). The popup never reports usage, so this is
+// the sole browser-side reporter and the delta can't be counted twice.
+function cbReportClusterUsage(groups, timers, resets) {
+  try {
+    const clusters = Array.isArray(cbConnection.clusters) ? cbConnection.clusters : [];
+    if (clusters.length === 0) return;
+    if (!cbConnection.ws || cbConnection.ws.readyState !== WebSocket.OPEN) return;
+    const program = cbDetectProgramId();
+    for (const g of groups) {
+      if (!g || g.groupType !== "site") continue;
+      const inCluster = clusters.some(
+        (c) =>
+          c &&
+          c.groupName === g.name &&
+          Array.isArray(c.members) &&
+          c.members.some((m) => m && m.program === program)
+      );
+      if (!inCluster) continue;
+      const current = Number(timers && timers[g.id]) || 0;
+      const resetAt = Number(resets && resets[g.id]) || 0;
+      const hasBaseline = Object.prototype.hasOwnProperty.call(cbClusterUsageBaseline, g.id);
+      const baseline = hasBaseline ? cbClusterUsageBaseline[g.id] : current;
+      const delta = Math.max(0, current - baseline);
+      const resetChanged = (Number(cbClusterUsageReset[g.id]) || 0) !== resetAt;
+      cbClusterUsageBaseline[g.id] = current;
+      cbClusterUsageReset[g.id] = resetAt;
+      // Nothing new to tell the hub: no local accrual, not our first report, and
+      // the window didn't roll over.
+      if (delta <= 0 && hasBaseline && !resetChanged) continue;
+      cbConnection.sendWS({
+        kind: "group-sync",
+        program,
+        groupName: g.name,
+        groupType: "site",
+        usageDeltaMs: delta,
+        usageMs: current,
+        usageResetAtMs: resetAt,
+        ts: Date.now()
+      });
+    }
+  } catch (_) {}
+}
+
+// Rebase the usage delta baseline to the hub's shared total for a group. Called
+// after folding the shared budget into local storage so the next reported delta
+// reflects only fresh local accrual on top of the shared total.
+function cbRebaseClusterUsage(groupId, sharedMs, resetAt) {
+  if (!groupId) return;
+  cbClusterUsageBaseline[groupId] = Math.max(0, Number(sharedMs) || 0);
+  if (Number.isFinite(resetAt)) cbClusterUsageReset[groupId] = Number(resetAt) || 0;
+}
+
+const cbConnection = {
+  ws: null,
+  pingTimer: null,
+  reconnectTimer: null,
+  desired: false,
+  address: CB_FIXED_ADDRESS,
+  status: { running: false, state: "off", address: "", peers: [], error: "" },
+  // Latest web-app bridge clusters that involve this endpoint (hub is the source
+  // of truth) and the last groups-announce we sent, so we can re-announce after
+  // a reconnect even if the popup is closed.
+  clusters: [],
+  lastAnnounce: null,
+  // Rapid-retry burst bookkeeping. burstStartMs marks the start of the current
+  // retry window; openedThisAttempt tracks whether the live socket connected.
+  burstStartMs: 0,
+  openedThisAttempt: false,
+
+  setStatus(patch) {
+    this.status = { ...this.status, ...patch };
+    this.broadcast();
+  },
+
+  broadcast() {
+    try {
+      chrome.runtime
+        .sendMessage({ type: "connection-status-push", status: this.status })
+        .catch(() => {});
+    } catch (_) {}
+  },
+
+  broadcastClusters() {
+    try {
+      chrome.runtime
+        .sendMessage({ type: "clusters-push", clusters: this.clusters })
+        .catch(() => {});
+    } catch (_) {}
+  },
+
+  // Applies hub-authoritative shared scalar settings to local block groups so
+  // synced timer/freeze/snooze changes enforce even when the popup is closed.
+  // Only scalars are applied here; blocked-domain lists stay locally owned.
+  async applySharedToStorage() {
+    const program = cbDetectProgramId();
+    const relevant = (Array.isArray(this.clusters) ? this.clusters : []).filter(
+      (cluster) =>
+        cluster &&
+        cluster.shared &&
+        Array.isArray(cluster.members) &&
+        cluster.members.some((m) => m && m.program === program)
+    );
+    if (relevant.length === 0) return;
+    let stored;
+    try {
+      stored = await chrome.storage.local.get({ [BLOCKED_GROUPS_KEY]: [] });
+    } catch (_) {
+      return;
+    }
+    const groups = Array.isArray(stored[BLOCKED_GROUPS_KEY]) ? stored[BLOCKED_GROUPS_KEY] : [];
+    let changed = false;
+    for (const cluster of relevant) {
+      const scalars = cluster.shared.scalars;
+      if (!scalars || typeof scalars !== "object") continue;
+      const idx = groups.findIndex((g) => g && g.name === cluster.groupName);
+      if (idx < 0) continue;
+      for (const field of CB_SYNC_SCALAR_FIELDS) {
+        if (
+          Object.prototype.hasOwnProperty.call(scalars, field) &&
+          JSON.stringify(groups[idx][field]) !== JSON.stringify(scalars[field])
+        ) {
+          groups[idx][field] = scalars[field];
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      try {
+        await chrome.storage.local.set({ [BLOCKED_GROUPS_KEY]: groups });
+      } catch (_) {}
+    }
+
+    // Apply the hub's shared live usage counter to the local timer store so the
+    // joint budget enforces even while the popup is closed (Default groups).
+    try {
+      const usageStore = await chrome.storage.local.get({
+        [USAGE_TIMERS_KEY]: {},
+        [USAGE_RESET_AT_KEY]: {}
+      });
+      const timers =
+        usageStore[USAGE_TIMERS_KEY] && typeof usageStore[USAGE_TIMERS_KEY] === "object"
+          ? usageStore[USAGE_TIMERS_KEY]
+          : {};
+      const resets =
+        usageStore[USAGE_RESET_AT_KEY] && typeof usageStore[USAGE_RESET_AT_KEY] === "object"
+          ? usageStore[USAGE_RESET_AT_KEY]
+          : {};
+      let usageChanged = false;
+      for (const cluster of relevant) {
+        const shared = cluster.shared;
+        if (!shared || (cluster.groupType && cluster.groupType !== "site")) continue;
+        if (!Number.isFinite(shared.usageMs)) continue;
+        const grp = groups.find((g) => g && g.name === cluster.groupName);
+        if (!grp || !grp.id) continue;
+        const incoming = Math.max(0, Number(shared.usageMs) || 0);
+        if ((Number(timers[grp.id]) || 0) !== incoming) {
+          timers[grp.id] = incoming;
+          usageChanged = true;
+        }
+        if (
+          Number.isFinite(shared.usageResetAtMs) &&
+          shared.usageResetAtMs > 0 &&
+          (Number(resets[grp.id]) || 0) !== Number(shared.usageResetAtMs)
+        ) {
+          resets[grp.id] = Number(shared.usageResetAtMs);
+          usageChanged = true;
+        }
+        // Rebase the delta baseline to the shared total so our next reported
+        // increment counts only fresh local accrual (never re-reports peers').
+        cbRebaseClusterUsage(grp.id, incoming, Number(shared.usageResetAtMs) || 0);
+      }
+      if (usageChanged) {
+        await chrome.storage.local.set({
+          [USAGE_TIMERS_KEY]: timers,
+          [USAGE_RESET_AT_KEY]: resets
+        });
+        await syncBlockingRules();
+      }
+    } catch (_) {}
+
+    // Adopt a newer shared active snooze so a snooze started on a linked member
+    // enforces here even while the popup is closed (newest start wins; fully
+    // expired entries are ignored so we never fight local expiry).
+    try {
+      const now = Date.now();
+      const snoozeStore = await chrome.storage.local.get({ [GROUP_SNOOZES_KEY]: {} });
+      const snoozes =
+        snoozeStore[GROUP_SNOOZES_KEY] && typeof snoozeStore[GROUP_SNOOZES_KEY] === "object"
+          ? snoozeStore[GROUP_SNOOZES_KEY]
+          : {};
+      let snoozeChanged = false;
+      for (const cluster of relevant) {
+        const shared = cluster.shared;
+        if (!shared) continue;
+        const sharedSnoozeTs = Number(shared.snoozeTs) || 0;
+        if (sharedSnoozeTs <= 0 || !shared.snooze || typeof shared.snooze !== "object") continue;
+        const grp = groups.find((g) => g && g.name === cluster.groupName);
+        if (!grp || !grp.id) continue;
+        const localEntry = snoozes[grp.id];
+        const localTs = localEntry ? Number(localEntry.startsAtMs) || 0 : 0;
+        if (sharedSnoozeTs <= localTs) continue;
+        const sanitized = sanitizeSnoozes({ [grp.id]: shared.snooze }, [grp], now);
+        const entry = sanitized[grp.id];
+        if (!entry || Number(entry.cooldownUntilMs) <= now) continue;
+        snoozes[grp.id] = entry;
+        snoozeChanged = true;
+      }
+      if (snoozeChanged) {
+        await chrome.storage.local.set({ [GROUP_SNOOZES_KEY]: snoozes });
+        await syncBlockingRules();
+      }
+    } catch (_) {}
+  },
+
+  sendWS(obj) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify(obj));
+        return true;
+      } catch (_) {}
+    }
+    return false;
+  },
+
+  clearTimers() {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  },
+
+  closeSocket() {
+    if (this.ws) {
+      try {
+        this.ws.onopen = this.ws.onmessage = this.ws.onerror = this.ws.onclose = null;
+        this.ws.close();
+      } catch (_) {}
+      this.ws = null;
+    }
+  },
+
+  connect() {
+    this.desired = true;
+    this.address = CB_FIXED_ADDRESS;
+    this.clearTimers();
+    this.closeSocket();
+    if (this.burstStartMs === 0) this.burstStartMs = Date.now();
+    this.setStatus({ state: "connecting", address: this.address, error: "" });
+    this.openedThisAttempt = false;
+    let socket;
+    try {
+      socket = new WebSocket(this.address);
+    } catch (error) {
+      this.setStatus({ state: "error", error: String(error && error.message ? error.message : error) });
+      this.scheduleSlowRetry();
+      return;
+    }
+    this.ws = socket;
+    socket.onopen = () => {
+      this.openedThisAttempt = true;
+      // Connected — close the current retry window.
+      this.burstStartMs = 0;
+      try {
+        socket.send(
+          JSON.stringify({
+            kind: "hello",
+            v: CB_CONNECTION_PROTOCOL_VERSION,
+            program: cbDetectProgramId()
+          })
+        );
+      } catch (_) {}
+      // Re-announce our group roster so the hub can validate name-based links.
+      if (this.lastAnnounce) {
+        try {
+          socket.send(JSON.stringify(this.lastAnnounce));
+        } catch (_) {}
+      }
+      this.pingTimer = setInterval(() => {
+        try {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ kind: "ping", t: Date.now() }));
+          }
+        } catch (_) {}
+      }, CB_CONNECTION_PING_MS);
+    };
+    socket.onmessage = (event) => {
+      this.handleMessage(event && event.data);
+    };
+    socket.onerror = () => {
+      // A failure before the socket ever opened just means the Mac server isn't
+      // reachable yet; let onclose drive the backed-off reconnect instead of
+      // flapping the status to "error" on every attempt.
+      if (this.openedThisAttempt) {
+        this.setStatus({ state: "error", error: "socket error" });
+      }
+    };
+    socket.onclose = () => {
+      this.clearTimers();
+      this.ws = null;
+      if (!this.desired) {
+        this.setStatus({ state: "off", peers: [] });
+        return;
+      }
+      if (this.openedThisAttempt) {
+        // A live connection dropped — start a fresh retry burst.
+        this.burstStartMs = 0;
+        this.setStatus({ state: "connecting", peers: [] });
+        this.scheduleBurstRetry();
+        return;
+      }
+      // Still trying to establish the first connection of this burst.
+      if (Date.now() - this.burstStartMs < CB_CONNECTION_BURST_WINDOW_MS) {
+        this.setStatus({ state: "connecting", peers: [] });
+        this.scheduleBurstRetry();
+      } else {
+        // Burst window elapsed without connecting. We still WANT to connect, so
+        // fall back to the slow retry cadence (every 5s) until the Mac server
+        // comes up. The user only stops attempts by toggling the client off.
+        this.burstStartMs = 0;
+        this.setStatus({ state: "disconnected", peers: [] });
+        this.scheduleSlowRetry();
+      }
+    };
+  },
+
+  scheduleBurstRetry() {
+    if (!this.desired || this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.desired) this.connect();
+    }, CB_CONNECTION_BURST_INTERVAL_MS);
+  },
+
+  // Slow reconnect probe used while "disconnected": the user still wants to be
+  // connected, so we keep retrying every 5s (a fresh burst each time) instead of
+  // giving up. A no-op once the user toggles the client off (desired = false).
+  scheduleSlowRetry() {
+    if (!this.desired || this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.desired) this.connect();
+    }, CB_CONNECTION_SLOW_INTERVAL_MS);
+  },
+
+  disconnect() {
+    this.desired = false;
+    this.clearTimers();
+    this.closeSocket();
+    this.setStatus({ state: "off", peers: [], error: "" });
+  },
+
+  handleMessage(raw) {
+    let msg = null;
+    try {
+      msg = typeof raw === "string" ? JSON.parse(raw) : raw;
+    } catch (_) {
+      return;
+    }
+    if (!msg || typeof msg !== "object") return;
+    switch (msg.kind) {
+      case "welcome":
+        this.setStatus({
+          state: "connected",
+          error: "",
+          peers: Array.isArray(msg.peers) ? msg.peers : this.status.peers
+        });
+        break;
+      case "rejected":
+        this.desired = false;
+        this.clearTimers();
+        this.closeSocket();
+        this.setStatus({ state: "error", error: msg.reason || "rejected", peers: [] });
+        break;
+      case "peers":
+        this.setStatus({ peers: Array.isArray(msg.peers) ? msg.peers : [] });
+        break;
+      case "clusters":
+        this.clusters = Array.isArray(msg.clusters) ? msg.clusters : [];
+        this.broadcastClusters();
+        this.applySharedToStorage();
+        break;
+      case "cluster-updated": {
+        const next = Array.isArray(this.clusters) ? this.clusters.slice() : [];
+        const idx = next.findIndex((c) => c && c.id === msg.cluster?.id);
+        const members = Array.isArray(msg.cluster?.members) ? msg.cluster.members : [];
+        if (members.length === 0) {
+          if (idx >= 0) next.splice(idx, 1);
+        } else if (idx >= 0) {
+          next[idx] = msg.cluster;
+        } else if (msg.cluster) {
+          next.push(msg.cluster);
+        }
+        this.clusters = next;
+        this.broadcastClusters();
+        this.applySharedToStorage();
+        break;
+      }
+      case "connect-group-rejected":
+        try {
+          chrome.runtime
+            .sendMessage({ type: "group-rejected", reason: msg.reason || "" })
+            .catch(() => {});
+        } catch (_) {}
+        break;
+      case "pong":
+        break;
+      default:
+        break;
+    }
+  },
+
+  async applyFromSettings() {
+    let conn = null;
+    try {
+      const r = await chrome.storage.local.get(CB_GLOBAL_SETTINGS_KEY);
+      const s = r && r[CB_GLOBAL_SETTINGS_KEY];
+      conn = s && typeof s === "object" ? s.connection : null;
+    } catch (_) {}
+    if (conn && conn.clientEnabled) {
+      this.burstStartMs = 0;
+      this.connect();
+    } else {
+      this.disconnect();
+    }
+  }
+};
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || typeof message.type !== "string") return false;
+  switch (message.type) {
+    case "connection-connect":
+      cbConnection.burstStartMs = 0;
+      cbConnection.connect();
+      sendResponse({ ok: true, status: cbConnection.status });
+      return false;
+    case "connection-disconnect":
+      cbConnection.disconnect();
+      sendResponse({ ok: true, status: cbConnection.status });
+      return false;
+    case "connection-status":
+      sendResponse({ ok: true, status: cbConnection.status });
+      return false;
+    case "group-connect":
+      cbConnection.sendWS({
+        kind: "connect-group",
+        groupName: message.groupName,
+        groupType: message.groupType,
+        fromProgram: message.fromProgram,
+        toProgram: message.toProgram
+      });
+      sendResponse({ ok: true });
+      return false;
+    case "group-disconnect":
+      cbConnection.sendWS({
+        kind: "disconnect-group",
+        clusterId: message.clusterId,
+        groupName: message.groupName,
+        program: message.program
+      });
+      sendResponse({ ok: true });
+      return false;
+    case "groups-announce":
+      cbConnection.lastAnnounce = {
+        kind: "groups-announce",
+        program: message.program,
+        groups: Array.isArray(message.groups) ? message.groups : []
+      };
+      cbConnection.sendWS(cbConnection.lastAnnounce);
+      sendResponse({ ok: true });
+      return false;
+    case "clusters-status":
+      sendResponse({ ok: true, clusters: cbConnection.clusters });
+      return false;
+    case "group-sync":
+      cbConnection.sendWS({
+        kind: "group-sync",
+        program: message.program,
+        groupName: message.groupName,
+        groupType: message.groupType,
+        ts: message.ts,
+        priority: message.priority === true,
+        scalars: message.scalars,
+        sites: message.sites,
+        apps: message.apps,
+        // Active-snooze runtime must be relayed too — without these the popup's
+        // snooze never reaches the hub and a snooze started on one member never
+        // propagates to its linked peers.
+        snooze: message.snooze,
+        snoozeTs: message.snoozeTs
+      });
+      sendResponse({ ok: true });
+      return false;
+    default:
+      return false;
+  }
+});
+
+// Re-apply when the user toggles the client on/off or edits the address.
+if (chrome.storage && chrome.storage.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !changes[CB_GLOBAL_SETTINGS_KEY]) return;
+    cbConnection.applyFromSettings();
+  });
+}
+
+// Auto-connect on service-worker startup if the user left the client enabled.
+cbConnection.applyFromSettings();
 
