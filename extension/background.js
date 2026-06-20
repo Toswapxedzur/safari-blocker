@@ -151,6 +151,7 @@ function createDefaultGroup(groupType = DEFAULT_GROUP_TYPE) {
     parentalPasswordSalt: null,
     sites: [],
     blockHomePage: false,
+    effect: "block",
     fallbackUrl: "",
     skipToNextOnBlock: false
   };
@@ -184,12 +185,18 @@ function normalizeBlockingMode(value) {
   return "instant";
 }
 
+// A "timed" mode owns a usage timer that accrues while the filter matches.
+// Both the count-down allowance ("after-minutes") and the count-up stopwatch
+// ("timer") accrue and surface an overlay item.
 function isTimedBlockingMode(mode) {
   return mode === "after-minutes" || mode === "timer";
 }
 
+// A "blocking timed" mode actually blocks once its threshold is reached.
+// "timer" is now a pure count-up stopwatch — it tracks time but never blocks —
+// so only "after-minutes" qualifies here.
 function isBlockingTimedMode(mode) {
-  return mode === "after-minutes" || mode === "timer";
+  return mode === "after-minutes";
 }
 
 function formatDayName(dayName) {
@@ -368,6 +375,10 @@ function sanitizeGroups(groups) {
           ? [...new Set(group.sites.map(normalizeSiteInput).filter(Boolean))]
           : [],
         blockHomePage: Boolean(group?.blockHomePage),
+        // Cascade effect: "allow" makes the group a whitelist/exception that
+        // rescues matched content from lower-priority block groups. Defaults to
+        // "block" so existing groups behave exactly as before.
+        effect: group?.effect === "allow" ? "allow" : "block",
         fallbackUrl: typeof group?.fallbackUrl === "string" ? group.fallbackUrl.trim() : "",
         skipToNextOnBlock: Boolean(group?.skipToNextOnBlock),
         // Preserve custom-rule fields verbatim so that any path which
@@ -739,12 +750,16 @@ function buildTimedItems(relevantGroups, usageTimersMs, usageResetAtMs, now) {
       const usedMs = usageTimersMs[group.id] ?? 0;
       const isBlockingMode = isBlockingTimedMode(group.mode);
       const remainingMs = isBlockingMode ? Math.max(getAllowedMs(group) - usedMs, 0) : Number.POSITIVE_INFINITY;
-      const displayMs = remainingMs;
+      // Count-down (after-minutes) shows the remaining allowance; the count-up
+      // "timer" stopwatch shows elapsed time instead.
+      const countsUp = group.mode === "timer";
+      const displayMs = countsUp ? usedMs : remainingMs;
       return {
         id: group.id,
         name: group.name,
         groupType: group.groupType,
         mode: group.mode,
+        countsUp,
         usedMs,
         allowedMinutes: group.allowedMinutes,
         resetIntervalHours: group.resetIntervalHours,
@@ -754,7 +769,13 @@ function buildTimedItems(relevantGroups, usageTimersMs, usageResetAtMs, now) {
         blocksNow: isBlockingMode && usedMs >= getAllowedMs(group)
       };
     })
-    .sort((left, right) => left.displayMs - right.displayMs || left.name.localeCompare(right.name));
+    // Count-up items sort after count-down ones; within each, by display value.
+    .sort((left, right) => {
+      if (left.countsUp !== right.countsUp) return left.countsUp ? 1 : -1;
+      const leftKey = Number.isFinite(left.displayMs) ? left.displayMs : Number.POSITIVE_INFINITY;
+      const rightKey = Number.isFinite(right.displayMs) ? right.displayMs : Number.POSITIVE_INFINITY;
+      return leftKey - rightKey || left.name.localeCompare(right.name);
+    });
 }
 
 async function loadStoredState() {
@@ -918,6 +939,16 @@ function getBlockingHostnames(groups, usageTimersMs, groupSnoozes, now) {
   return sanitizeBlockingDomains(blockedHostnames);
 }
 
+// Whether a platform group should actually hide matched content right now
+// (vs. merely measuring exposure for its usage timer): instant always blocks,
+// "after-minutes" blocks only after its allowance is spent, and the count-up
+// "timer" stopwatch never blocks.
+function isPlatformBlockEnforcing(group, usageTimersMs) {
+  if (group.mode === "instant") return true;
+  if (!isBlockingTimedMode(group.mode)) return false;
+  return (usageTimersMs[group.id] ?? 0) >= getAllowedMs(group);
+}
+
 function buildPlatformFeedFilters(pageContext, groups, usageTimersMs, groupSnoozes, now) {
   const filters = [];
   const currentSite = pageContext.videoSite;
@@ -934,23 +965,23 @@ function buildPlatformFeedFilters(pageContext, groups, usageTimersMs, groupSnooz
       ) {
         continue;
       }
-      if (
-        group.mode !== "instant" &&
-        (!isBlockingTimedMode(group.mode) || (usageTimersMs[group.id] ?? 0) < getAllowedMs(group))
-      ) {
-        continue;
-      }
       const authorMode = normalizePlatformAuthorMode(group.platformAuthorMode);
       // "nobody" and the YouTube tag stubs don't trim the feed by author.
       if (authorMode !== "all" && authorMode !== "include" && authorMode !== "exclude") {
         continue;
       }
+      // Always emit the filter so content.js can measure exposure (for the
+      // usage timer) even while the group isn't blocking yet. `enforce` decides
+      // whether matched cards are actually hidden: instant always, after-minutes
+      // only past its allowance, and the count-up "timer" mode never.
+      const enforce = isPlatformBlockEnforcing(group, usageTimersMs);
       filters.push({
         id: group.id,
         site: group.groupType,
         videoMode: normalizeVideoMode(group.platformVideoMode),
         authorMode,
-        authors: [...group.platformAuthors]
+        authors: [...group.platformAuthors],
+        enforce
       });
     }
   }
@@ -965,21 +996,17 @@ function buildPlatformFeedFilters(pageContext, groups, usageTimersMs, groupSnooz
       ) {
         continue;
       }
-      if (
-        group.mode !== "instant" &&
-        (!isBlockingTimedMode(group.mode) || (usageTimersMs[group.id] ?? 0) < getAllowedMs(group))
-      ) {
-        continue;
-      }
       const subreddits = Array.isArray(group.redditSubreddits) ? group.redditSubreddits : [];
       const redditMode = normalizeRedditMode(group.redditMode, subreddits);
       if (redditMode === "all") continue;
       if (redditMode === "include" && subreddits.length === 0) continue;
+      const enforce = isPlatformBlockEnforcing(group, usageTimersMs);
       filters.push({
         id: group.id,
         site: "reddit",
         redditMode,
-        subreddits: [...subreddits]
+        subreddits: [...subreddits],
+        enforce
       });
     }
   }
@@ -994,21 +1021,17 @@ function buildPlatformFeedFilters(pageContext, groups, usageTimersMs, groupSnooz
       ) {
         continue;
       }
-      if (
-        group.mode !== "instant" &&
-        (!isBlockingTimedMode(group.mode) || (usageTimersMs[group.id] ?? 0) < getAllowedMs(group))
-      ) {
-        continue;
-      }
       const authorMode = normalizePlatformAuthorMode(group.platformAuthorMode);
       // mode "all" blocks the whole page (handled by the matcher); "nobody"
       // blocks nothing. Only include/exclude trim the feed per-account.
       if (authorMode !== "include" && authorMode !== "exclude") continue;
+      const enforce = isPlatformBlockEnforcing(group, usageTimersMs);
       filters.push({
         id: group.id,
         site: "twitter",
         authorMode,
-        authors: [...group.platformAuthors]
+        authors: [...group.platformAuthors],
+        enforce
       });
     }
   }
@@ -1046,16 +1069,45 @@ function buildSurfaceHideSelectors(pageContext, groups, groupSnoozes, now) {
   return [...selectors];
 }
 
+// Timed groups the user is currently "exposed" to via feed content (reported
+// by content.js) but that aren't matched at the page level. Used so the home
+// feed accrues time and shows a count-up/down overlay without redirecting the
+// whole page.
+function getExposedTimedGroups(exposedGroupIds, groups, relevantGroups, groupSnoozes, now) {
+  if (!Array.isArray(exposedGroupIds) || exposedGroupIds.length === 0) return [];
+  const exposed = new Set(exposedGroupIds);
+  const alreadyRelevant = new Set(relevantGroups.map((group) => group.id));
+  return groups.filter(
+    (group) =>
+      exposed.has(group.id) &&
+      !alreadyRelevant.has(group.id) &&
+      isTimedBlockingMode(group.mode) &&
+      group.enabled &&
+      isGroupActiveNow(group, now) &&
+      !getActiveSnooze(group.id, groupSnoozes, now)
+  );
+}
+
 function buildPageSession(
   pageContext,
   groups,
   usageTimersMs,
   usageResetAtMs,
   groupSnoozes,
-  now
+  now,
+  exposedGroupIds = []
 ) {
   const relevantGroups = getRelevantGroupsForPage(pageContext, groups, groupSnoozes, now);
-  const timedItems = buildTimedItems(relevantGroups, usageTimersMs, usageResetAtMs, now);
+  const relevantTimedItems = buildTimedItems(relevantGroups, usageTimersMs, usageResetAtMs, now);
+  const exposedGroups = getExposedTimedGroups(
+    exposedGroupIds,
+    groups,
+    relevantGroups,
+    groupSnoozes,
+    now
+  );
+  const exposedTimedItems = buildTimedItems(exposedGroups, usageTimersMs, usageResetAtMs, now);
+  const timedItems = relevantTimedItems.concat(exposedTimedItems);
   const feedFilters = buildPlatformFeedFilters(
     pageContext,
     groups,
@@ -1068,10 +1120,13 @@ function buildPageSession(
   const blockedByHostname = currentBlockedHostnames.some((hostname) =>
     pageContext.hostname && hostnameMatchesSite(pageContext.hostname, hostname)
   );
+  // Page-level blocking (full exit) only comes from page-matched groups. Feed
+  // exposure never redirects the page — it just enforces the feed filter
+  // (handled by buildPlatformFeedFilters) and shows the overlay.
   const blockedNow =
     blockedByHostname ||
     relevantGroups.some((group) => group.mode === "instant") ||
-    timedItems.some((item) => item.blocksNow);
+    relevantTimedItems.some((item) => item.blocksNow);
 
   let fallbackUrl = "";
   let skipToNextOnBlock = false;
@@ -1094,10 +1149,23 @@ function buildPageSession(
     items: timedItems,
     feedFilters,
     surfaceHides,
+    feedOrder: buildFeedOrder(groups),
     fallbackUrl,
     skipToNextOnBlock,
     now
   };
+}
+
+// Group priority + effect for the content-side cascade. Order is the group's
+// list position (index 0 = top of the list = highest priority, "first wins").
+// effect "allow" turns a match into a whitelist/exception that can rescue what
+// a lower-priority block group hid; everything defaults to "block".
+function buildFeedOrder(groups) {
+  if (!Array.isArray(groups)) return [];
+  return groups.map((group) => ({
+    id: group.id,
+    effect: group && group.effect === "allow" ? "allow" : "block"
+  }));
 }
 
 async function scheduleNextTransitionAlarm(groups, usageResetAtMs, groupSnoozes, now) {
@@ -1169,8 +1237,11 @@ async function syncBlockingRules() {
   await scheduleNextTransitionAlarm(groups, usageResetAtMs, groupSnoozes, now);
 }
 
-async function applyElapsedTime(pageContextInput, elapsedMs) {
+async function applyElapsedTime(pageContextInput, elapsedMs, exposedGroupIdsInput) {
   const pageContext = normalizePageContext(pageContextInput);
+  const exposedGroupIds = Array.isArray(exposedGroupIdsInput)
+    ? exposedGroupIdsInput.filter((id) => typeof id === "string")
+    : [];
   if (!pageContext.hostname) {
     return {
       showTimer: false,
@@ -1200,9 +1271,19 @@ async function applyElapsedTime(pageContextInput, elapsedMs) {
 
   const relevantGroups = getRelevantGroupsForPage(pageContext, groups, groupSnoozes, now);
   const relevantTimedGroups = relevantGroups.filter((group) => isTimedBlockingMode(group.mode));
+  // Platform groups also accrue while the user is "exposed" to targeted feed
+  // content (reported by content.js), not only on fully page-matched pages.
+  const exposedTimedGroups = getExposedTimedGroups(
+    exposedGroupIds,
+    groups,
+    relevantGroups,
+    groupSnoozes,
+    now
+  );
+  const accrualGroups = relevantTimedGroups.concat(exposedTimedGroups);
 
   if (
-    relevantTimedGroups.length === 0 ||
+    accrualGroups.length === 0 ||
     relevantGroups.some((group) => group.mode === "instant")
   ) {
     return buildPageSession(
@@ -1211,7 +1292,8 @@ async function applyElapsedTime(pageContextInput, elapsedMs) {
       usageTimersMs,
       usageResetAtMs,
       groupSnoozes,
-      now
+      now,
+      exposedGroupIds
     );
   }
 
@@ -1219,7 +1301,7 @@ async function applyElapsedTime(pageContextInput, elapsedMs) {
   let changed = false;
   let reachedLimit = false;
 
-  for (const group of relevantTimedGroups) {
+  for (const group of accrualGroups) {
     const currentValue = nextTimers[group.id] ?? 0;
     const thresholdMs = getAllowedMs(group);
     const nextValue =
@@ -1237,7 +1319,7 @@ async function applyElapsedTime(pageContextInput, elapsedMs) {
     await chrome.storage.local.set({ [USAGE_TIMERS_KEY]: nextTimers });
     // Report accrual to the hub so clustered Default groups keep one shared
     // live budget even while this browser's popup is closed.
-    cbReportClusterUsage(relevantTimedGroups, nextTimers, usageResetAtMs);
+    cbReportClusterUsage(accrualGroups, nextTimers, usageResetAtMs);
   }
   if (reachedLimit) {
     await syncBlockingRules();
@@ -1249,7 +1331,8 @@ async function applyElapsedTime(pageContextInput, elapsedMs) {
     nextTimers,
     usageResetAtMs,
     groupSnoozes,
-    now
+    now,
+    exposedGroupIds
   );
 }
 
@@ -1535,8 +1618,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const tabId = sender?.tab?.id ?? null;
     const tabUrl = sender?.tab?.url || sender?.url || "";
     const heartbeatElapsedMs = Math.max(0, Number(message.elapsedMs) || 0);
+    const heartbeatExposedIds = Array.isArray(message.exposedGroupIds)
+      ? message.exposedGroupIds
+      : [];
     queueUsageTimerUpdate(() =>
-      applyElapsedTime(message.pageContext ?? message.hostname, heartbeatElapsedMs)
+      applyElapsedTime(message.pageContext ?? message.hostname, heartbeatElapsedMs, heartbeatExposedIds)
     )
       .then(async (payload) => {
         // Drive custom-rule timers from the same visibility-aware
@@ -2451,67 +2537,114 @@ async function broadcastCustomPanelRefresh(panelGroups = []) {
   );
 }
 
-// ── Dynamic site blocklist (ev.block / ev.unblock) ──────────────────────
+async function applySandboxResultToTab(tabId, result, descriptor) {
+  if (!result || typeof tabId !== "number") return;
+  // Aggregate logs from the main dispatch + any synthResults (posted
+  // events, timerEnded). Each entry: { level, groupId, args }.
+  const logs = Array.isArray(result.logs) ? result.logs.slice() : [];
+  const domOps = Array.isArray(result.domOps) ? result.domOps.slice() : [];
+  const intents = Array.isArray(result.intents)
+    ? result.intents.filter((intent) => !intent || intent.kind !== "localFile")
+    : [];
+  const panelPayload = collectPanelSnapshots(result);
+  if (Array.isArray(result.synthResults)) {
+    for (const synth of result.synthResults) {
+      const sr = synth && synth.result;
+      if (!sr) continue;
+      if (Array.isArray(sr.logs)) logs.push(...sr.logs);
+      if (Array.isArray(sr.domOps)) domOps.push(...sr.domOps);
+      if (Array.isArray(sr.intents)) {
+        intents.push(...sr.intents.filter((intent) => !intent || intent.kind !== "localFile"));
+      }
+    }
+  }
+  // Skip empty applies (they would only spam the per-tab queue with
+  // ticks that have no observable side effect).
+  if (logs.length === 0 && domOps.length === 0 && intents.length === 0 &&
+      panelPayload.panels.length === 0 && panelPayload.groups.length === 0 &&
+      !result.defaultPrevented && !result.redirectUrl &&
+      typeof result.result !== "string") {
+    return;
+  }
+  // Process window-level intents in the background (they require chrome.tabs).
+  const windowIntents = intents.filter((i) => i && i.kind === "window");
+  const contentIntents = intents.filter((i) => !i || i.kind !== "window");
+  if (windowIntents.length > 0) {
+    processWindowIntents(windowIntents, tabId).catch(() => {});
+  }
+
+  const message = {
+    type: "event-sandbox-apply",
+    descriptor,
+    defaultPrevented: Boolean(result.defaultPrevented),
+    result: result.result ?? null,
+    redirectUrl: result.redirectUrl || "",
+    domOps,
+    intents: contentIntents,
+    panelSnapshots: panelPayload.panels,
+    panelGroups: panelPayload.groups,
+    logs
+  };
+  const sent = await trySendApply(tabId, message);
+  if (!sent) {
+    // Content script not ready yet (very common right after
+    // webNavigation.onCommitted: the openWebEvent dispatch is faster
+    // than content_scripts run_at: document_idle). Queue it; we will
+    // flush on the next "content-ready" handshake from this tab.
+    enqueueApply(tabId, message);
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Window helper: dynamic site blocklist + tab management
+// ────────────────────────────────────────────────────────────────────────
+
 const __windowBlockedSites = new Set();
 
 function windowBlocklistNormalize(pattern) {
-  let s = String(pattern || "").trim().toLowerCase();
-  if (s.startsWith("http://")) s = s.slice(7);
-  if (s.startsWith("https://")) s = s.slice(8);
-  if (s.startsWith("www.")) s = s.slice(4);
-  const slashIdx = s.indexOf("/");
-  if (slashIdx > 0) s = s.slice(0, slashIdx);
-  return s;
+  let p = String(pattern || "").trim().toLowerCase();
+  if (p.startsWith("http://")) p = p.slice(7);
+  if (p.startsWith("https://")) p = p.slice(8);
+  if (p.startsWith("www.")) p = p.slice(4);
+  const slashIdx = p.indexOf("/");
+  if (slashIdx > 0) p = p.slice(0, slashIdx);
+  return p;
 }
 
 function windowBlocklistMatches(url) {
   if (__windowBlockedSites.size === 0) return false;
   try {
-    let h = new URL(url).hostname.toLowerCase();
-    if (h.startsWith("www.")) h = h.slice(4);
-    for (const p of __windowBlockedSites) {
-      if (h === p || h.endsWith("." + p)) return true;
+    let hostname = new URL(url).hostname.toLowerCase();
+    if (hostname.startsWith("www.")) hostname = hostname.slice(4);
+    for (const pattern of __windowBlockedSites) {
+      if (hostname === pattern || hostname.endsWith("." + pattern)) return true;
     }
   } catch {}
   return false;
 }
 
-async function closeTabsMatchingBlocklist() {
-  if (__windowBlockedSites.size === 0) return;
-  try {
-    const api = (typeof browser !== "undefined" && browser.tabs) || chrome.tabs;
-    const tabs = await api.query({});
-    for (const tab of tabs) {
-      if (tab.url && windowBlocklistMatches(tab.url)) {
-        try { await api.remove(tab.id); } catch {}
-      }
-    }
-  } catch {}
-}
-
 async function processWindowIntents(intents, originTabId) {
-  const api = (typeof browser !== "undefined" && browser.tabs) || chrome.tabs;
   for (const intent of intents) {
     if (!intent) continue;
     switch (intent.action) {
       case "closeActiveTab":
         if (typeof originTabId === "number") {
-          try { await api.remove(originTabId); } catch {}
+          try { await chrome.tabs.remove(originTabId); } catch {}
         }
         break;
       case "closeTab":
         if (typeof intent.tabId === "number") {
-          try { await api.remove(intent.tabId); } catch {}
+          try { await chrome.tabs.remove(intent.tabId); } catch {}
         }
         break;
       case "closeTabByUrl": {
         const url = String(intent.url || "");
         if (!url) break;
         try {
-          const tabs = await api.query({});
+          const tabs = await chrome.tabs.query({});
           for (const tab of tabs) {
             if (tab.url && tab.url.includes(url)) {
-              await api.remove(tab.id);
+              await chrome.tabs.remove(tab.id);
             }
           }
         } catch {}
@@ -2534,63 +2667,16 @@ async function processWindowIntents(intents, originTabId) {
   }
 }
 
-async function applySandboxResultToTab(tabId, result, descriptor) {
-  if (!result || typeof tabId !== "number") return;
-  // Aggregate logs from the main dispatch + any synthResults (posted
-  // events, timerEnded). Each entry: { level, groupId, args }.
-  const logs = Array.isArray(result.logs) ? result.logs.slice() : [];
-  const domOps = Array.isArray(result.domOps) ? result.domOps.slice() : [];
-  const intents = Array.isArray(result.intents)
-    ? result.intents.filter((intent) => !intent || intent.kind !== "localFile")
-    : [];
-  const panelPayload = collectPanelSnapshots(result);
-  if (Array.isArray(result.synthResults)) {
-    for (const synth of result.synthResults) {
-      const sr = synth && synth.result;
-      if (!sr) continue;
-      if (Array.isArray(sr.logs)) logs.push(...sr.logs);
-      if (Array.isArray(sr.domOps)) domOps.push(...sr.domOps);
-      if (Array.isArray(sr.intents)) {
-        intents.push(...sr.intents.filter((intent) => !intent || intent.kind !== "localFile"));
+async function closeTabsMatchingBlocklist() {
+  if (__windowBlockedSites.size === 0) return;
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      if (tab.url && windowBlocklistMatches(tab.url)) {
+        try { await chrome.tabs.remove(tab.id); } catch {}
       }
     }
-  }
-
-  // Process window-level intents in the background (they require tabs API).
-  const windowIntents = intents.filter((i) => i && i.kind === "window");
-  const contentIntents = intents.filter((i) => !i || i.kind !== "window");
-  if (windowIntents.length > 0) {
-    processWindowIntents(windowIntents, tabId).catch(() => {});
-  }
-
-  // Skip empty applies (they would only spam the per-tab queue with
-  // ticks that have no observable side effect).
-  if (logs.length === 0 && domOps.length === 0 && contentIntents.length === 0 &&
-      panelPayload.panels.length === 0 && panelPayload.groups.length === 0 &&
-      !result.defaultPrevented && !result.redirectUrl &&
-      typeof result.result !== "string") {
-    return;
-  }
-  const message = {
-    type: "event-sandbox-apply",
-    descriptor,
-    defaultPrevented: Boolean(result.defaultPrevented),
-    result: result.result ?? null,
-    redirectUrl: result.redirectUrl || "",
-    domOps,
-    intents: contentIntents,
-    panelSnapshots: panelPayload.panels,
-    panelGroups: panelPayload.groups,
-    logs
-  };
-  const sent = await trySendApply(tabId, message);
-  if (!sent) {
-    // Content script not ready yet (very common right after
-    // webNavigation.onCommitted: the openWebEvent dispatch is faster
-    // than content_scripts run_at: document_idle). Queue it; we will
-    // flush on the next "content-ready" handshake from this tab.
-    enqueueApply(tabId, message);
-  }
+  } catch {}
 }
 
 async function dispatchEventToTab(type, tabInfo, extras = {}) {
@@ -2668,6 +2754,12 @@ async function handleCommittedWebNavigation(details) {
   if (!details || details.frameId !== 0) return;
   const tabId = details.tabId;
   if (typeof tabId !== "number" || tabId < 0) return;
+
+  // Chokepoint: close tab immediately if navigating to a dynamically blocked site.
+  if (details.url && windowBlocklistMatches(details.url)) {
+    try { await chrome.tabs.remove(tabId); } catch {}
+    return;
+  }
   const previous = previousTabUrls.get(tabId);
   const previousUrl = previous?.url || null;
   const previousHost = previous?.hostname || "";
@@ -2973,7 +3065,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         slot: message.slot,
         items: Array.isArray(message.items) ? message.items : []
       });
-      sendResponse({ ok: Boolean(r && r.ok), results: r && Array.isArray(r.results) ? r.results : [] });
+      sendResponse({
+        ok: Boolean(r && r.ok),
+        results: r && Array.isArray(r.results) ? r.results : [],
+        evaluatedGroups: r && Array.isArray(r.evaluatedGroups) ? r.evaluatedGroups : []
+      });
     })();
     return true;
   }
@@ -3051,9 +3147,12 @@ const CB_CONNECTION_PROTOCOL_VERSION = 1;
 // Fixed loopback address for the macOS hub (port is no longer configurable).
 const CB_FIXED_ADDRESS = "ws://127.0.0.1:8787";
 const CB_CONNECTION_PING_MS = 20_000;
-// When (re)connecting we retry rapidly for a short window to catch a Mac server
-// that is just starting up. If nothing connects within the window we stop and
-// show "disconnected" until the user reconnects (or the SW retries on wake).
+// Four-state connection model (matches the UI):
+//   connecting   – actively probing; rapid burst every 100ms for a 5s window.
+//   disconnected – burst window elapsed without success; keep probing slowly
+//                  (every 5s) because the user still WANTS to connect.
+//   connected    – live socket.
+//   off          – user toggled the client off; no connection attempts at all.
 const CB_CONNECTION_BURST_INTERVAL_MS = 100;
 const CB_CONNECTION_BURST_WINDOW_MS = 5_000;
 const CB_CONNECTION_SLOW_INTERVAL_MS = 5_000;

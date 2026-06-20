@@ -13,13 +13,13 @@
     "128": "icons/icon-128.png"
   },
   "background": {
-    "scripts": ["browser-compat.js", "sandbox-transport.js", "platform-profiles.js", "helpers.js", "background.js"],
+    "scripts": ["browser-compat.js", "sandbox-transport.js", "helpers.js", "background.js"],
     "persistent": false
   },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["browser-compat.js", "platform-profiles.js", "helpers.js", "content.js"],
+      "js": ["browser-compat.js", "helpers.js", "content.js"],
       "run_at": "document_idle"
     }
   ],

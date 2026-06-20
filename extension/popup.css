@@ -7,7 +7,9 @@
   --navy-100: #eef2ff;
   --navy-ring: rgba(30, 58, 138, 0.18);
 
-  /* Gold / yellow accent for custom/AI/experimental surfaces. */
+  /* Gold / yellow accent for custom/AI/experimental surfaces. A true golden
+     amber rather than the old olive-brown, for better synergy with the cream
+     gold-50/100/200 tints. */
   --gold-700: #ca8a04;
   --gold-200: #fde68a;
   --gold-100: #fef3c7;
