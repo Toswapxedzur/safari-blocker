@@ -1,8 +1,8 @@
 {
-  "app.title": "Screen Time Limiter: Custom Website Blocker & Focus Timer",
+  "app.title": "Adamancia Vault — Website Blocker & Focus Timer",
   "hero.subtitle": "",
   "siteAccess.title": "Limited site access detected",
-  "siteAccess.body": "Chrome is currently restricting this extension's access to web pages. Screen Time Limiter: Custom Website Blocker & Focus Timer needs access to all sites in order to block them.",
+  "siteAccess.body": "Chrome is currently restricting this extension's access to web pages. Adamancia Vault needs access to all sites in order to block them.",
   "siteAccess.grant": "Grant access",
   "siteAccess.dismiss": "Dismiss",
   "siteAccess.grantFailed": "Chrome rejected the access request. You can change site access in chrome://extensions.",
@@ -535,5 +535,5 @@
   "logFeed.hint": "Output from helpers.log() / helpers.warn() / helpers.error() inside your custom rules.",
   "logFeed.empty": "Nothing logged yet. Call helpers.log(\"hello\") inside one of your handlers to see entries here.",
   "logFeed.clear": "Clear",
-  "app.shortTitle": "Custom Website Blocker"
+  "app.shortTitle": "Adamancia Vault"
 }
