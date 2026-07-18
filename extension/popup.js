@@ -207,9 +207,6 @@ const DEFAULT_GLOBAL_SETTINGS = {
   showOnPageLogToasts: true,
   defaultSnoozeMinutes: 30,
   defaultFallbackUrl: "about:blank",
-  // Opt-in: when on, the YouTube collector shares encountered channel ids
-  // (and nothing else) with the tag server to help classify creators.
-  contributeChannels: false,
   connection: { ...DEFAULT_CONNECTION_SETTINGS }
 };
 const TICK_RATE_MIN_MS = 250;
@@ -327,10 +324,6 @@ const platformAuthorsBlock = document.getElementById("platformAuthorsBlock");
 const platformAuthorsLabel = document.getElementById("platformAuthorsLabel");
 const platformAuthorsField = document.getElementById("platformAuthors");
 const platformVideoHelp = document.getElementById("platformVideoHelp");
-const platformAuthorTagsBlock = document.getElementById("platformAuthorTagsBlock");
-const platformAuthorTagsLabel = document.getElementById("platformAuthorTagsLabel");
-const platformAuthorTagsField = document.getElementById("platformAuthorTags");
-const platformAuthorTagsHelp = document.getElementById("platformAuthorTagsHelp");
 const platformBlockHomePageField = document.getElementById("platformBlockHomePage");
 const skipToNextOnBlockRow = document.getElementById("skipToNextOnBlockRow");
 const skipToNextOnBlockField = document.getElementById("skipToNextOnBlock");
@@ -408,24 +401,9 @@ const settingsTickRateField = document.getElementById("settingsTickRate");
 const settingsAutosaveDebounceField = document.getElementById("settingsAutosaveDebounce");
 const settingsDebugModeField = document.getElementById("settingsDebugMode");
 const settingsShowOnPageLogToastsField = document.getElementById("settingsShowOnPageLogToasts");
-const settingsContributeChannelsField = document.getElementById("settingsContributeChannels");
-const platformAuthorTagsList = document.getElementById("platformAuthorTagsList");
-const tagPickerModal = document.getElementById("tagPickerModal");
-const tagPickerSearch = document.getElementById("tagPickerSearch");
-const tagPickerResults = document.getElementById("tagPickerResults");
-const tagPickerEmpty = document.getElementById("tagPickerEmpty");
-const tagPickerError = document.getElementById("tagPickerError");
-const tagPickerCloseButton = document.getElementById("tagPickerCloseButton");
-const ytCacheRefreshButton = document.getElementById("ytCacheRefresh");
-const ytCacheClearButton = document.getElementById("ytCacheClear");
-const ytCacheBoxPending = document.getElementById("ytCachePending");
-const ytCacheBoxProtected = document.getElementById("ytCacheProtected");
-const ytCacheBoxProbation = document.getElementById("ytCacheProbation");
 const ytTierCountPending = document.getElementById("ytTierPendingCount");
 const ytTierCountProtected = document.getElementById("ytTierProtectedCount");
 const ytTierCountProbation = document.getElementById("ytTierProbationCount");
-const ytCacheSearchInput = document.getElementById("ytCacheSearch");
-let ytCacheSearchTimer = null;
 const settingsDefaultSnoozeMinutesField = document.getElementById("settingsDefaultSnoozeMinutes");
 const settingsDefaultFallbackUrlField = document.getElementById("settingsDefaultFallbackUrl");
 const localFolderChooseButton = document.getElementById("localFolderChooseButton");
@@ -1557,498 +1535,13 @@ function syncSettingsFormFromState() {
   if (settingsAutosaveDebounceField) settingsAutosaveDebounceField.value = String(s.autosaveDebounceMs);
   if (settingsDebugModeField) settingsDebugModeField.checked = Boolean(s.debugMode);
   if (settingsShowOnPageLogToastsField) settingsShowOnPageLogToastsField.checked = s.showOnPageLogToasts !== false;
-  if (settingsContributeChannelsField) settingsContributeChannelsField.checked = s.contributeChannels === true;
-  renderYtCache();
   if (settingsDefaultSnoozeMinutesField) settingsDefaultSnoozeMinutesField.value = String(s.defaultSnoozeMinutes);
   if (settingsDefaultFallbackUrlField) settingsDefaultFallbackUrlField.value = s.defaultFallbackUrl ?? "";
   if (settingsStatus) settingsStatus.textContent = "";
 }
 
-// --- YouTube tag targeting picker (per group) --------------------------
-let ytBlockPickerWired = false;
-let tagPickerSearchTimer = null;
-let ytAllTags = null; // full validated tag list, fetched once: [{slug,name,dimension,color}]
-let ytAllTagsLoading = null;
-let ytTagBySlug = new Map(); // slug -> {slug,name,dimension,color} for chip labels
-const YT_BLOCK_MAX_RESULTS = 60;
-
-function ytBlockApiBase() {
-  const custom = state.globalSettings?.contributeApiBase;
-  if (typeof custom === "string" && /^https?:\/\//.test(custom.trim())) {
-    return custom.trim().replace(/\/$/, "");
-  }
-  return "http://127.0.0.1:8000";
-}
-
-// Fetch every tag once so the picker filters a known-valid list locally — the
-// user can only ever add a real tag (like the app's selection panel).
-function loadAllTags(force) {
-  if (ytAllTags && !force) return Promise.resolve(ytAllTags);
-  if (ytAllTagsLoading) return ytAllTagsLoading;
-  ytAllTagsLoading = (async () => {
-    try {
-      // Localize the picker: the API LEFT JOINs tag_names and falls back to the
-      // canonical literal_name, so an untranslated locale is safe.
-      let locale = "en";
-      try { locale = loadLanguage() || "en"; } catch (_) {}
-      const resp = await fetch(
-        `${ytBlockApiBase()}/api/tags/all?locale=${encodeURIComponent(locale)}`
-      );
-      if (!resp.ok) throw new Error("HTTP " + resp.status);
-      const rows = await resp.json();
-      ytAllTags = (rows || [])
-        .filter((r) => r && r.slug)
-        .map((r) => ({
-          slug: r.slug,
-          name: r.name || r.literal_name || r.slug,
-          dimension: r.dimension || "",
-          color: r.color || ""
-        }));
-      ytTagBySlug = new Map(ytAllTags.map((t) => [t.slug, t]));
-      return ytAllTags;
-    } catch (_) {
-      ytAllTags = null; // allow a later retry
-      throw new Error("unreachable");
-    } finally {
-      ytAllTagsLoading = null;
-    }
-  })();
-  return ytAllTagsLoading;
-}
-
-// The per-group Tags field is backed by a hidden textarea of newline-separated
-// tag *slugs*; the chip list is the editable surface. This keeps the existing
-// draft / autosave / save pipeline (which reads platformAuthorTags.value)
-// working unchanged, while guaranteeing only server-validated slugs get in.
-function getPlatformTagSlugs() {
-  if (!platformAuthorTagsField) return [];
-  return [
-    ...new Set(
-      String(platformAuthorTagsField.value || "")
-        .split(/[\n,]+/)
-        .map((s) => s.trim())
-        .filter(Boolean)
-    )
-  ];
-}
-
-function commitPlatformTagSlugs(slugs) {
-  if (!platformAuthorTagsField) return;
-  const unique = [...new Set(slugs.map((s) => s.trim()).filter(Boolean))];
-  platformAuthorTagsField.value = unique.join("\n");
-  renderPlatformTagChips();
-  // Tags ride the normal draft -> autosave pipeline (no special direct write).
-  // Because the picker is a click-then-close gesture, we flush *immediately and
-  // awaited* instead of via the debounced timer, so closing the popup right
-  // after a tag edit can't drop it. Non-strict autosave guarantees the tags
-  // commit even if a sibling field is mid-edit/invalid.
-  stashCurrentDraft();
-  renderGroupList();
-  if (state.autosaveTimeoutId !== null) {
-    window.clearTimeout(state.autosaveTimeoutId);
-    state.autosaveTimeoutId = null;
-  }
-  return autosaveSelectedGroup().catch((error) => {
-    console.error("Failed to save tag edit.", error);
-    setStatus(t("status.errorSaveGroup"), true);
-  });
-}
-
-function tagLabelForSlug(slug) {
-  const tag = ytTagBySlug.get(slug);
-  return tag ? tag.name : slug;
-}
-
-// Union of tag slugs across enabled groups targeting "creators with a certain
-// tag" — mirrors the logic the content blocker uses, for the cache inspector.
-function blockedTagSlugsFromGroups() {
-  const out = new Set();
-  for (const g of state.groups || []) {
-    if (!g || g.enabled !== true) continue;
-    if (normalizePlatformAuthorMode(g.platformAuthorMode) !== "tagInclude") continue;
-    for (const s of g.platformAuthorTags || []) {
-      if (typeof s === "string" && s.trim()) out.add(s.trim());
-    }
-  }
-  return out;
-}
-
-function filterLocalTags(term) {
-  const q = term.trim().toLowerCase();
-  if (!ytAllTags) return [];
-  if (!q) return ytAllTags;
-  return ytAllTags.filter(
-    (t) => t.name.toLowerCase().includes(q) || t.slug.toLowerCase().includes(q)
-  );
-}
-
-function renderPlatformTagChips() {
-  if (!platformAuthorTagsList) return;
-  const editable = !(platformAuthorTagsField && platformAuthorTagsField.disabled);
-  platformAuthorTagsList.classList.toggle("tag-chip-list-disabled", !editable);
-  platformAuthorTagsList.innerHTML = "";
-
-  for (const slug of getPlatformTagSlugs()) {
-    const tag = ytTagBySlug.get(slug);
-    const chip = document.createElement("span");
-    chip.className = "tag-chip";
-    chip.setAttribute("role", "listitem");
-    chip.title = slug;
-
-    const sw = document.createElement("span");
-    sw.className = "swatch";
-    if (tag && tag.color) sw.style.background = tag.color;
-    chip.appendChild(sw);
-
-    const label = document.createElement("span");
-    label.textContent = tagLabelForSlug(slug);
-    chip.appendChild(label);
-
-    if (editable) {
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "tag-chip-remove";
-      remove.setAttribute("aria-label", t("tagPicker.removeAria", { name: tagLabelForSlug(slug) }));
-      remove.textContent = "\u00d7";
-      remove.addEventListener("click", () => {
-        commitPlatformTagSlugs(getPlatformTagSlugs().filter((s) => s !== slug));
-      });
-      chip.appendChild(remove);
-    }
-    platformAuthorTagsList.appendChild(chip);
-  }
-
-  // Trailing "+" tile opens the validated picker (like the app's app picker).
-  const add = document.createElement("button");
-  add.type = "button";
-  add.className = "tag-chip-add";
-  add.setAttribute("aria-label", t("tagPicker.addAria"));
-  add.textContent = "+";
-  add.disabled = !editable;
-  add.addEventListener("click", () => openTagPicker());
-  platformAuthorTagsList.appendChild(add);
-
-  // Upgrade slug-only labels to names once the tag list finishes loading.
-  if (!ytAllTags && getPlatformTagSlugs().length) {
-    loadAllTags(false).then(() => renderPlatformTagChips()).catch(() => {});
-  }
-}
-
-function openTagPicker() {
-  if (!tagPickerModal || (platformAuthorTagsField && platformAuthorTagsField.disabled)) return;
-  if (tagPickerSearch) tagPickerSearch.value = "";
-  tagPickerModal.classList.remove("hidden");
-  renderTagPickerResults("");
-  if (tagPickerSearch) window.setTimeout(() => tagPickerSearch.focus(), 0);
-}
-
-function closeTagPicker() {
-  if (tagPickerModal) tagPickerModal.classList.add("hidden");
-}
-
-async function renderTagPickerResults(query) {
-  if (!tagPickerResults) return;
-  if (tagPickerError) tagPickerError.classList.add("hidden");
-
-  if (!ytAllTags) {
-    tagPickerResults.innerHTML = "";
-    if (tagPickerEmpty) {
-      tagPickerEmpty.classList.add("hidden");
-    }
-    try {
-      await loadAllTags(false);
-    } catch (_) {
-      tagPickerResults.innerHTML = "";
-      if (tagPickerError) tagPickerError.classList.remove("hidden");
-      return;
-    }
-  }
-
-  const have = new Set(getPlatformTagSlugs());
-  const matches = filterLocalTags(query || "").filter((tag) => !have.has(tag.slug));
-  tagPickerResults.innerHTML = "";
-
-  for (const tag of matches.slice(0, YT_BLOCK_MAX_RESULTS)) {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "tag-picker-row";
-    row.setAttribute("role", "option");
-
-    const sw = document.createElement("span");
-    sw.className = "swatch";
-    if (tag.color) sw.style.background = tag.color;
-    row.appendChild(sw);
-
-    const text = document.createElement("span");
-    text.className = "tag-picker-row-text";
-    const name = document.createElement("span");
-    name.className = "tag-picker-row-name";
-    name.textContent = tag.name;
-    const slug = document.createElement("span");
-    slug.className = "tag-picker-row-slug";
-    slug.textContent = tag.slug;
-    text.appendChild(name);
-    text.appendChild(slug);
-    row.appendChild(text);
-
-    const dim = document.createElement("span");
-    dim.className = "tag-picker-row-dim";
-    dim.textContent = tag.dimension || "";
-    row.appendChild(dim);
-
-    row.addEventListener("click", () => {
-      commitPlatformTagSlugs([...getPlatformTagSlugs(), tag.slug]);
-      closeTagPicker();
-    });
-    tagPickerResults.appendChild(row);
-  }
-
-  if (matches.length > YT_BLOCK_MAX_RESULTS) {
-    const more = document.createElement("div");
-    more.className = "field-help";
-    more.style.padding = "6px 11px";
-    more.textContent = t("tagPicker.more", {
-      shown: YT_BLOCK_MAX_RESULTS,
-      total: matches.length
-    });
-    tagPickerResults.appendChild(more);
-  }
-
-  if (tagPickerEmpty) {
-    tagPickerEmpty.classList.toggle("hidden", matches.length > 0);
-  }
-}
-
-function ytAgeLabel(ms) {
-  if (!ms) return "never";
-  const d = Date.now() - ms;
-  if (d < 60000) return Math.round(d / 1000) + "s ago";
-  if (d < 3600000) return Math.round(d / 60000) + "m ago";
-  if (d < 86400000) return Math.round(d / 3600000) + "h ago";
-  return Math.round(d / 86400000) + "d ago";
-}
-
-function formatSubsShort(n) {
-  if (typeof n !== "number" || !isFinite(n)) return "?";
-  if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, "") + "B";
-  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
-  if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "K";
-  return String(n);
-}
-
-// Render the extension's local YouTube tag state straight from storage, so the
-// user can see exactly what's cached and why a video is / isn't blocked.
-// A rounded tag pill (colored dot + literal name), mirroring the picker chip.
-function ytTagChipEl(slug, blocked) {
-  const tag = ytTagBySlug.get(slug);
-  const chip = document.createElement("span");
-  chip.className = "tag-chip" + (blocked && blocked.has(slug) ? " blocked" : "");
-  chip.title = slug;
-  const sw = document.createElement("span");
-  sw.className = "swatch";
-  if (tag && tag.color) sw.style.background = tag.color;
-  chip.appendChild(sw);
-  const label = document.createElement("span");
-  label.textContent = tagLabelForSlug(slug);
-  chip.appendChild(label);
-  return chip;
-}
-
-// A grey, display-only pill for non-topic states (e.g. "below floor").
-function ytDisplayChipEl(text) {
-  const chip = document.createElement("span");
-  chip.className = "tag-chip display";
-  const sw = document.createElement("span");
-  sw.className = "swatch";
-  chip.appendChild(sw);
-  const label = document.createElement("span");
-  label.textContent = text;
-  chip.appendChild(label);
-  return chip;
-}
-
-// One row: name + id/subs + activity meta, with tag pills stacked underneath.
-function ytCacheRowEl(cid, v, blocked) {
-  const slugs = Array.isArray(v.t) ? v.t : [];
-  const isBlocked = slugs.some((s) => blocked.has(s));
-  const row = document.createElement("div");
-  row.className = "yt-cache-row" + (isBlocked ? " blocked" : "");
-
-  const nameCol = document.createElement("span");
-  nameCol.className = "yt-cache-name";
-
-  const title = document.createElement("span");
-  title.className = "yt-cache-title";
-  title.textContent = v.n || cid;
-  nameCol.appendChild(title);
-
-  const sub = document.createElement("code");
-  sub.className = "yt-cache-id";
-  sub.textContent =
-    cid + (typeof v.subs === "number" ? ` · ${formatSubsShort(v.subs)} subs` : "");
-  nameCol.appendChild(sub);
-
-  const meta = document.createElement("span");
-  meta.className = "yt-cache-meta";
-  const bits = [];
-  bits.push(v.last ? "seen " + ytAgeLabel(v.last) : "not visited");
-  if (typeof v.score === "number" && v.score > 0) bits.push("freq " + v.score.toFixed(1));
-  meta.textContent = bits.join(" · ");
-  nameCol.appendChild(meta);
-
-  row.appendChild(nameCol);
-
-  // Tags stacked under the name. below_floor renders as a grey display pill.
-  const tagsBox = document.createElement("span");
-  tagsBox.className = "yt-cache-tags";
-  if (slugs.length) {
-    for (const slug of slugs) tagsBox.appendChild(ytTagChipEl(slug, blocked));
-  } else if (v.s === "below_floor") {
-    tagsBox.appendChild(ytDisplayChipEl("below floor"));
-  }
-  if (tagsBox.childNodes.length) row.appendChild(tagsBox);
-
-  return row;
-}
-
-// Tier of an entry for the three-box view. "pending" means exactly one thing:
-// we're still WAITING FOR THE SERVER'S FIRST RESPONSE for this channel
-// (inflight). The moment the lookup returns — with tags, a sub count, or even
-// just "unknown"/"pending" classification — the flag is cleared and the entry is
-// a normal cached verdict, ranked by its activity tier (protected vs probation).
-// This keeps the pending box showing only genuinely-unanswered channels.
-function ytTierOf(v) {
-  if (v && v.inflight === true) return "pending";
-  return v && v.tier === "protected" ? "protected" : "probation";
-}
-
-function ytRenderTierBox(box, countEl, entries, blocked) {
-  if (countEl) countEl.textContent = String(entries.length);
-  if (!box) return;
-  box.textContent = "";
-  if (!entries.length) {
-    const empty = document.createElement("div");
-    empty.className = "yt-cache-empty";
-    empty.textContent = "—";
-    box.appendChild(empty);
-    return;
-  }
-  const CAP = 200;
-  const shown = entries.slice(0, CAP);
-  for (const [cid, v] of shown) box.appendChild(ytCacheRowEl(cid, v, blocked));
-  if (entries.length > shown.length) {
-    const more = document.createElement("div");
-    more.className = "yt-cache-empty";
-    more.textContent = `…and ${entries.length - shown.length} more.`;
-    box.appendChild(more);
-  }
-}
-
-async function renderYtCache() {
-  if (!ytCacheBoxPending && !ytCacheBoxProtected && !ytCacheBoxProbation) return;
-  // Make sure tag names/colors are available so chips read nicely.
-  if (!ytAllTags) loadAllTags(false).then(() => renderYtCache()).catch(() => {});
-
-  let store = {};
-  try {
-    store = await chrome.storage.local.get(["ytVerdicts"]);
-  } catch (_) {}
-
-  const cache = store.ytVerdicts || { rev: null, items: {} };
-  const verdicts = cache.items || {};
-  const blocked = blockedTagSlugsFromGroups();
-
-  // Shared free-text filter (name, channel id, or tag slug) across all boxes.
-  const q = (ytCacheSearchInput ? ytCacheSearchInput.value : "").trim().toLowerCase();
-  const match = ([cid, v]) => {
-    if (!q) return true;
-    if (cid.toLowerCase().includes(q)) return true;
-    if (v.n && v.n.toLowerCase().includes(q)) return true;
-    return (Array.isArray(v.t) ? v.t : []).some((s) => s.toLowerCase().includes(q));
-  };
-
-  // Within each box, rank by activity: decayed frequency then recency.
-  const byActivity = (a, b) => {
-    const sa = a[1].score || 0;
-    const sb = b[1].score || 0;
-    if (sa !== sb) return sb - sa;
-    return (b[1].last || 0) - (a[1].last || 0);
-  };
-
-  const buckets = { pending: [], protected: [], probation: [] };
-  for (const entry of Object.entries(verdicts)) {
-    if (!entry[1] || !match(entry)) continue;
-    buckets[ytTierOf(entry[1])].push(entry);
-  }
-  buckets.pending.sort(byActivity);
-  buckets.protected.sort(byActivity);
-  buckets.probation.sort(byActivity);
-
-  ytRenderTierBox(ytCacheBoxPending, ytTierCountPending, buckets.pending, blocked);
-  ytRenderTierBox(ytCacheBoxProtected, ytTierCountProtected, buckets.protected, blocked);
-  ytRenderTierBox(ytCacheBoxProbation, ytTierCountProbation, buckets.probation, blocked);
-}
-
-function setupYtTagUi() {
-  if (ytBlockPickerWired) return;
-  ytBlockPickerWired = true;
-
-  // Tag picker modal (used by the per-group Tags field).
-  if (tagPickerSearch) {
-    tagPickerSearch.addEventListener("input", () => {
-      if (tagPickerSearchTimer) clearTimeout(tagPickerSearchTimer);
-      const q = tagPickerSearch.value;
-      tagPickerSearchTimer = setTimeout(() => renderTagPickerResults(q), 120);
-    });
-  }
-  if (tagPickerCloseButton) {
-    tagPickerCloseButton.addEventListener("click", () => closeTagPicker());
-  }
-  if (tagPickerModal) {
-    tagPickerModal.addEventListener("click", (event) => {
-      if (event.target === tagPickerModal) closeTagPicker();
-    });
-  }
-
-  // Local cache inspector (Settings → debug).
-  if (ytCacheRefreshButton) {
-    ytCacheRefreshButton.addEventListener("click", () => renderYtCache());
-  }
-  if (ytCacheSearchInput) {
-    ytCacheSearchInput.addEventListener("input", () => {
-      if (ytCacheSearchTimer) clearTimeout(ytCacheSearchTimer);
-      ytCacheSearchTimer = setTimeout(() => renderYtCache(), 120);
-    });
-  }
-  if (ytCacheClearButton) {
-    ytCacheClearButton.addEventListener("click", async () => {
-      // Full clean slate. Route through the background worker so its IN-MEMORY
-      // cbYtVerdicts is reset too — otherwise the worker re-persists the cache
-      // on the next activity and the entries reappear (the "can't be deleted"
-      // bug). Fall back to a direct storage wipe only if the worker is asleep.
-      let cleared = false;
-      try {
-        const resp = await chrome.runtime.sendMessage({ type: "cb-yt-clear" });
-        cleared = !!(resp && resp.ok);
-      } catch (_) {}
-      if (!cleared) {
-        try {
-          await chrome.storage.local.remove([
-            "ytBundle",
-            "ytVerdicts",
-            "ytSentIds",
-            "ytContribStats"
-          ]);
-        } catch (_) {}
-      }
-      renderYtCache();
-    });
-  }
-}
-
 function openSettings() {
   state.isSettingsOpen = true;
-  setupYtTagUi();
   syncSettingsFormFromState();
   requestConnectionStatus();
   settingsModal.classList.remove("hidden");
@@ -2069,9 +1562,6 @@ async function saveSettingsFromForm() {
     autosaveDebounceMs: settingsAutosaveDebounceField?.value,
     debugMode: settingsDebugModeField?.checked ?? false,
     showOnPageLogToasts: settingsShowOnPageLogToastsField?.checked ?? true,
-    contributeChannels: settingsContributeChannelsField?.checked ?? false,
-    contributeAsked: state.globalSettings?.contributeAsked,
-    contributeApiBase: state.globalSettings?.contributeApiBase,
     defaultSnoozeMinutes: settingsDefaultSnoozeMinutesField?.value,
     defaultFallbackUrl: settingsDefaultFallbackUrlField?.value
   };
@@ -2676,17 +2166,10 @@ function sanitizeGlobalSettings(raw) {
     autosaveDebounceMs,
     debugMode,
     showOnPageLogToasts,
-    contributeChannels: src.contributeChannels === true,
     defaultSnoozeMinutes,
     defaultFallbackUrl,
     connection: sanitizeConnectionSettings(src.connection)
   };
-  // Pass through opt-in bookkeeping written by the first-run consent page so a
-  // later Settings save doesn't drop it.
-  if (src.contributeAsked === true) out.contributeAsked = true;
-  if (typeof src.contributeApiBase === "string" && src.contributeApiBase.trim()) {
-    out.contributeApiBase = src.contributeApiBase.trim();
-  }
   return out;
 }
 
@@ -2959,15 +2442,11 @@ function applyPlatformRulesHeader(groupType) {
   if (platformVideoCopy) platformVideoCopy.textContent = t("platform.rulesCopy", { platform });
 }
 
-// Builds the author/account mode dropdown for the current platform. Video
-// platforms + Twitter share these modes; YouTube additionally offers the
-// (visual-only) tag modes.
+// Builds the author/account mode dropdown for the current platform.
 function rebuildAuthorModeOptions(type) {
   const isTwitter = type === "twitter";
-  const isYouTube = type === "youtube";
   const noun = isTwitter ? t("platform.nounAccounts") : t("platform.nounAuthors");
   const modes = ["all", "include", "exclude", "nobody"];
-  if (isYouTube) modes.push("tagInclude", "tagExclude");
 
   const previous = platformAuthorModeField.value;
   platformAuthorModeField.innerHTML = "";
@@ -3014,10 +2493,6 @@ function applyPlatformVideoUi(groupType) {
       ? t("platform.help.twitter", { platform })
       : t("platform.help.generic", { platform, shortLabel, longLabel, postLabel });
 
-  // YouTube-only tag stubs.
-  platformAuthorTagsLabel.textContent = t("platform.authorTags");
-  platformAuthorTagsField.setAttribute("placeholder", t("platform.authorTagsPlaceholder"));
-  platformAuthorTagsHelp.textContent = t("platform.authorTagsHelp");
 }
 
 function getProfileSurfaceHideEntries(groupType) {
@@ -3188,10 +2663,6 @@ function describePlatformVideoScope(groupLike) {
     scopes.push(t("meta.allExceptCreators", { count: authors.length }));
   } else if (authorMode === "nobody") {
     scopes.push(t("meta.noAuthors"));
-  } else if (authorMode === "tagInclude") {
-    scopes.push(t("meta.tagAuthors"));
-  } else if (authorMode === "tagExclude") {
-    scopes.push(t("meta.tagAuthorsExcept"));
   }
 
   if (scopes.length > 0) {
@@ -4012,7 +3483,6 @@ function createDefaultGroup(groupType = DEFAULT_GROUP_TYPE) {
     platformVideoMode: "all",
     platformAuthorMode: "all",
     platformAuthors: [],
-    platformAuthorTags: [],
     redditMode: "all",
     redditSubreddits: [],
     discordMode: "all",
@@ -4088,7 +3558,6 @@ function sanitizeGroups(groups) {
       .map((day) => String(day).trim().toLowerCase())
       .filter((day, index, array) => DAY_NAMES.includes(day) && array.indexOf(day) === index);
     const rawAuthors = Array.isArray(group?.platformAuthors) ? group.platformAuthors : [];
-    const rawAuthorTags = Array.isArray(group?.platformAuthorTags) ? group.platformAuthorTags : [];
     const rawRedditSubreddits = Array.isArray(group?.redditSubreddits) ? group.redditSubreddits : [];
     const rawDiscordTargets = Array.isArray(group?.discordTargets) ? group.discordTargets : [];
 
@@ -4128,10 +3597,6 @@ function sanitizeGroups(groups) {
             .map((author) => normalizePlatformAuthorInput(author, normalizedGroupType))
             .filter(Boolean)
         )
-      ],
-      // Visual-only stub: free-form tags for the YouTube tag author modes.
-      platformAuthorTags: [
-        ...new Set(rawAuthorTags.map((tag) => String(tag ?? "").trim()).filter(Boolean))
       ],
       redditSubreddits: [
         ...new Set(rawRedditSubreddits.map(normalizeRedditSubredditInput).filter(Boolean))
@@ -4283,7 +3748,6 @@ function getSerializableGroupSnapshot(group) {
     platformVideoMode: group.platformVideoMode,
     platformAuthorMode: group.platformAuthorMode,
     platformAuthors: [...group.platformAuthors],
-    platformAuthorTags: [...(group.platformAuthorTags ?? [])],
     redditMode: group.redditMode,
     redditSubreddits: [...group.redditSubreddits],
     discordMode: group.discordMode,
@@ -4406,7 +3870,6 @@ function groupToDraft(group) {
     platformVideoMode: normalizeVideoMode(group.platformVideoMode),
     platformAuthorMode: normalizePlatformAuthorMode(group.platformAuthorMode),
     platformAuthorsText: group.platformAuthors.join("\n"),
-    platformAuthorTagsText: (group.platformAuthorTags ?? []).join("\n"),
     redditMode: normalizeRedditMode(group.redditMode, group.redditSubreddits),
     redditSubredditsText: group.redditSubreddits.join("\n"),
     discordMode: normalizeDiscordMode(group.discordMode, group.discordTargets),
@@ -5453,8 +4916,6 @@ function renderEditor(now = Date.now()) {
   blockedSitesField.value = draft?.sitesText ?? group.sites.join("\n");
   blockingRulesField.value = draft?.blockingRulesText ?? group.blockingRulesText;
   platformAuthorsField.value = draft?.platformAuthorsText ?? group.platformAuthors.join("\n");
-  platformAuthorTagsField.value =
-    draft?.platformAuthorTagsText ?? (group.platformAuthorTags ?? []).join("\n");
   platformVideoModeField.value = draft?.platformVideoMode ?? group.platformVideoMode;
   platformAuthorModeField.value = normalizePlatformAuthorMode(
     draft?.platformAuthorMode ?? group.platformAuthorMode
@@ -5539,13 +5000,10 @@ function renderEditor(now = Date.now()) {
   blockingRulesField.disabled = !editable || !isCustomGroup;
   const currentAuthorMode = normalizePlatformAuthorMode(platformAuthorModeField.value);
   const authorModeUsesList = platformAuthorModeUsesList(currentAuthorMode); // include/exclude
-  const authorModeUsesTags = isPlatformAuthorTagMode(currentAuthorMode); // youtube tag stubs
-  // Show the author list only for include/exclude; show the tag box only for the
-  // YouTube tag modes; show neither for "all"/"no authors".
+  // Show the author list only for include/exclude; show it for neither
+  // "all" nor "no authors".
   platformAuthorsBlock.classList.toggle("hidden", !usesAuthorAxis || !authorModeUsesList);
-  platformAuthorTagsBlock.classList.toggle("hidden", !usesAuthorAxis || !authorModeUsesTags);
   platformAuthorsField.disabled = !editable || !usesAuthorAxis || !authorModeUsesList;
-  platformAuthorTagsField.disabled = !editable || !usesAuthorAxis || !authorModeUsesTags;
   platformVideoModeField.disabled = !editable || !isPlatformVideoGroup;
   platformAuthorModeField.disabled = !editable || !usesAuthorAxis;
   redditModeField.disabled = !editable || !isRedditGroup;
@@ -5733,7 +5191,6 @@ function stashCurrentDraft() {
     platformVideoMode: platformVideoModeField.value,
     platformAuthorMode: platformAuthorModeField.value,
     platformAuthorsText: platformAuthorsField.value,
-    platformAuthorTagsText: platformAuthorTagsField.value,
     redditMode: redditModeField.value,
     redditSubredditsText: redditSubredditsField.value,
     discordMode: discordModeField.value,
@@ -6124,15 +5581,6 @@ function buildUpdatedGroupFromDraft(group, draft, { strict = true } = {}) {
   const siteResults = parseSiteTextareaValue(draft.sitesText);
   const authorResults = parsePlatformAuthorsTextarea(group.groupType, draft.platformAuthorsText);
   const authorMode = normalizePlatformAuthorMode(draft.platformAuthorMode);
-  // Visual-only stub: tags are free-form, so every non-empty entry is kept.
-  const authorTags = [
-    ...new Set(
-      String(draft.platformAuthorTagsText ?? "")
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean)
-    )
-  ];
   const redditResults = parseRedditSubredditsTextarea(draft.redditSubredditsText);
   const redditMode = normalizeRedditMode(draft.redditMode, redditResults.validSubreddits);
   const discordResults = parseDiscordTargetsTextarea(draft.discordTargetsText);
@@ -6214,7 +5662,6 @@ function buildUpdatedGroupFromDraft(group, draft, { strict = true } = {}) {
       platformVideoMode: normalizeVideoMode(draft.platformVideoMode),
       platformAuthorMode: authorMode,
       platformAuthors: usesAuthorAxis ? authorResults.validAuthors : group.platformAuthors,
-      platformAuthorTags: usesAuthorAxis ? authorTags : (group.platformAuthorTags ?? []),
       surfaceHides: normalizeSurfaceHides(
         Array.isArray(draft.surfaceHides) ? draft.surfaceHides : group.surfaceHides,
         group.groupType
@@ -7424,8 +6871,8 @@ function buildCustomRuleAiPrompt(userRequest, currentRule) {
     "HELPERS.TAB: tab=helpers.getTabHelper(); tab.list(), getActiveTab(), getById(id), countOpen(), requestRefresh(). Uses snapshot bundled with dispatch.",
     "HELPERS.PLATFORM (RAW): p=helpers.platform('youtube') OR helpers.platform().youtube(). Platforms: youtube, tiktok, instagram, facebook, twitch. Raw methods on each: p.hide(slot,predicate,opts?) installs a per-(group,platform,slot) hide predicate; p.hide(predicate,opts?) (no slot) applies to every feed slot; p.allow(slot,predicate,opts?) / p.allow(predicate,opts?) installs a RESCUE predicate (effect 'allow') that overrides lower-priority block groups in the shared cascade; p.show(slot?) clears one slot's predicate (or all when slot omitted); p.surface(name,'hide'|'show') toggles a whole region; p.timer(slot,opts) caps subsection time and returns its id; p.snapshot() returns the raw per-platform snapshot or null; introspection p.slots()/p.surfaces()/p.timerSlots(); URL classifiers p.isPlatformUrl/isShortUrl/isVideoUrl/isPostUrl/isHomePage/extractAuthor/extractVideoId. opts: {blockPageOnVisit?} (redirect the page when a block predicate matches). Calling hide/show/timer with a slot the platform doesn't support throws TypeError. One predicate per (group,platform,slot); each call replaces it.",
     "PLATFORM_SLOTS: youtube slots=shorts,videos,posts,comments,live surfaces=home,comments,shortButton,live timerSlots=shorts,videos,posts. tiktok slots=videos,comments,live surfaces=home,comments,live timerSlots=videos. instagram slots=shorts(Reels),posts,comments surfaces=home,comments timerSlots=shorts,posts. facebook slots=shorts(Reels),videos,posts,comments,live surfaces=home,comments,live timerSlots=shorts,videos,posts. twitch slots=shorts(Clips),streams,videos,live surfaces=home,comments,live timerSlots=shorts,streams,videos.",
-    "PLATFORM_PREDICATE_ITEM: the predicate receives a raw feed-card item={url,name,title,author,channelId,length,views,publishedAt,description,live,sponsored,algorithmic,videoForm}; most fields may be null/false. On YouTube the item is enriched with item.creator={id,subCount,tags,[],name,handle} (subCount may be null until the channel resolves — null-check and fail open). videoForm is one of short/long/post. Predicates run async in the sandbox over batches of cards; keep them pure and fast. Example: helpers.platform('youtube').hide('videos', it => it.creator && typeof it.creator.subCount==='number' && it.creator.subCount < 100000).",
-    "COMMON_PATTERNS: hide feed cards by creator/tag/subcount -> helpers.platform(site).hide(slot,predicate) (re-installs on each Run; persists across navigations). Rescue/whitelist -> helpers.platform(site).allow(slot,predicate). Whole-page block -> in event.on('webChangedEvent'[,'openWebEvent']) handler, if the URL matches, call ev.setRedirectLink(url?) then ev.setResult(-1) (network-level blocking no longer exists; blocking is redirect-based). Time budgets -> getOrCreateTimer with scope/domain plus a handler that checks isExpired and redirects. Hide whole regions -> helpers.platform(site).surface('home','hide').",
+    "PLATFORM_PREDICATE_ITEM: the predicate receives a raw feed-card item={url,name,title,author,channelId,length,views,publishedAt,description,live,sponsored,algorithmic,videoForm}; most fields may be null/false. videoForm is one of short/long/post. Predicates run async in the sandbox over batches of cards; keep them pure and fast. Example: helpers.platform('youtube').hide('videos', it => it.author === 'example-channel').",
+    "COMMON_PATTERNS: hide feed cards by author or title -> helpers.platform(site).hide(slot,predicate) (re-installs on each Run; persists across navigations). Rescue/whitelist -> helpers.platform(site).allow(slot,predicate). Whole-page block -> in event.on('webChangedEvent'[,'openWebEvent']) handler, if the URL matches, call ev.setRedirectLink(url?) then ev.setResult(-1) (network-level blocking no longer exists; blocking is redirect-based). Time budgets -> getOrCreateTimer with scope/domain plus a handler that checks isExpired and redirects. Hide whole regions -> helpers.platform(site).surface('home','hide').",
     "CURRENT_RULE_BEGIN",
     "BEGIN_CURRENT_RULE",
     existingRule,
@@ -7733,12 +7180,6 @@ setupYtTagUi();
 loadAllTags(false).catch(() => {});
 
 platformAuthorsField.addEventListener("input", () => {
-  stashCurrentDraft();
-  renderGroupList();
-  scheduleAutosave();
-});
-
-platformAuthorTagsField.addEventListener("input", () => {
   stashCurrentDraft();
   renderGroupList();
   scheduleAutosave();
