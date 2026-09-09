@@ -70,6 +70,7 @@ function normalizeHostname(hostname) {
 //   normalizeYouTubeCreatorInput, normalizePlatformAuthorInput,
 //   normalizeRedditSubredditInput, normalizeDiscordTargetInput,
 //   isYouTubeHost, isRedditHost, isDiscordHost, isTwitterHost,
+//   getPlatformGroupTypeForHost,
 //   parseRedditSubredditFromPath, parseDiscordServerIdFromPath,
 //   parseDiscordChannelIdFromPath, detectVideoSiteContext.
 
@@ -281,28 +282,26 @@ function getFeedCardElements(site) {
     ];
   }
 
-  const anchorSelectors =
-    site === "tiktok"
-      ? ['a[href*="/video/"]']
-      : site === "instagram"
-        ? ['a[href^="/reel/"]', 'a[href^="/p/"]', 'a[href^="/tv/"]']
-      : site === "facebook"
-        ? ['a[href*="/reel/"]', 'a[href*="/watch/"]', 'a[href*="/posts/"]', 'a[href*="/permalink/"]']
-      : site === "twitch"
-        ? ['a[href*="/clip/"]', 'a[href^="/videos/"]']
-      : [];
+  const feedProfile = PLATFORM_PROFILES?.[site]?.feed;
+  const anchorSelectors = Array.isArray(feedProfile?.anchorSelectors)
+    ? feedProfile.anchorSelectors
+    : [];
 
   if (anchorSelectors.length === 0) return [];
 
   const containers = new Set();
-  const containerSelector = [
-    "article",
-    '[role="article"]',
-    '[data-e2e*="item"]',
-    '[data-testid*="cell"]',
-    '[data-pagelet]',
-    "li"
-  ].join(", ");
+  const containerSelector = (
+    Array.isArray(feedProfile?.containerSelectors) && feedProfile.containerSelectors.length > 0
+      ? feedProfile.containerSelectors
+      : [
+          "article",
+          '[role="article"]',
+          '[data-e2e*="item"]',
+          '[data-testid*="cell"]',
+          '[data-pagelet]',
+          "li"
+        ]
+  ).join(", ");
 
   for (const anchor of document.querySelectorAll(anchorSelectors.join(", "))) {
     const container = anchor.closest(containerSelector);
@@ -317,16 +316,10 @@ function isPostCard(card) {
 
 function getFeedCardHref(card, site) {
   if (site !== "youtube") {
-    const preferredSelector =
-      site === "tiktok"
-        ? 'a[href*="/video/"]'
-        : site === "instagram"
-          ? 'a[href^="/reel/"], a[href^="/p/"], a[href^="/tv/"]'
-        : site === "facebook"
-          ? 'a[href*="/reel/"], a[href*="/watch/"], a[href*="/posts/"], a[href*="/permalink/"]'
-        : site === "twitch"
-          ? 'a[href*="/clip/"], a[href^="/videos/"]'
-          : "a[href]";
+    const profileSelectors = PLATFORM_PROFILES?.[site]?.feed?.hrefSelectors;
+    const preferredSelector = Array.isArray(profileSelectors) && profileSelectors.length > 0
+      ? profileSelectors.join(", ")
+      : "a[href]";
     const href = card.querySelector(preferredSelector)?.getAttribute("href") ??
       card.querySelector("a[href]")?.getAttribute("href");
     return href || null;
@@ -458,8 +451,7 @@ function getCurrentFeedSite() {
   const videoCtx = detectVideoSiteContext(hostname, location.pathname);
   if (videoCtx.site) return videoCtx.site;
   if (isRedditHost(hostname)) return "reddit";
-  if (isTwitterHost(hostname)) return "twitter";
-  return null;
+  return getPlatformGroupTypeForHost(hostname);
 }
 
 function getFeedCardData(card) {
@@ -493,14 +485,20 @@ function getFeedCardData(card) {
     return { videoForm: videoContext.form, creators };
   }
   if (isPostCard(card)) {
-    return { videoForm: "post", creators: getFeedCardCreators(card) };
+    return {
+      videoForm: "post",
+      creators: getFeedCardCreators(card)
+    };
   }
   const href = getFeedCardHref(card, "youtube");
   if (!href) return null;
   let url;
   try { url = new URL(href, location.origin); } catch { return null; }
   const videoContext = detectVideoSiteContext(normalizeHostname(url.hostname), url.pathname);
-  return { videoForm: videoContext.form, creators: getFeedCardCreators(card) };
+  return {
+    videoForm: videoContext.form,
+    creators: getFeedCardCreators(card)
+  };
 }
 
 function matchesFeedFilter(cardData, filter) {
@@ -516,7 +514,7 @@ function matchesFeedFilter(cardData, filter) {
     if (cardData.videoForm !== filter.videoMode) return false;
   }
   if (filter.authorMode === "all") return true;
-  // "nobody" / tag stubs never trim by author (and aren't emitted as filters).
+  // "nobody" never trims by author (and isn't emitted as a filter).
   if (filter.authorMode !== "include" && filter.authorMode !== "exclude") return false;
   const authors = Array.isArray(filter.authors) ? filter.authors : [];
   if (authors.length === 0) return false;
@@ -558,6 +556,96 @@ function showElement(element) {
   }
   element.removeAttribute("data-custom-blocker-feed-hidden");
   element.removeAttribute("aria-hidden");
+}
+
+// Content-tag block = a "content blocked" state that is a LIVE function of the
+// card's tags. The thumbnail is blacked out and its click-to-watch disabled,
+// while title, author, tags and the Vault pill stay visible and interactive.
+// There is no manual toggle — correcting the tag (via the pill) recomputes the
+// block, so the blacked state clears instantly the moment the tag no longer
+// qualifies (the tag pipeline re-applies the verdict on every tag change).
+
+// The media (thumbnail) element to black out, per card. Covers YouTube's older
+// ytd-thumbnail (grid + search) AND the newer lockup layout
+// (yt-thumbnail-view-model) used on the home feed; other platforms extend this.
+const CB_MEDIA_SELECTORS = "ytd-thumbnail, yt-thumbnail-view-model, yt-collection-thumbnail-view-model, ytd-playlist-thumbnail, ytm-thumbnail-cover";
+
+function cbFindMedia(card) {
+  try { return card.querySelector(CB_MEDIA_SELECTORS); } catch { return null; }
+}
+
+// Vault pill hosts, registered by the tag pipeline. Kept in a private WeakSet
+// (not a DOM marker — the host must stay unfingerprintable) so the interceptor
+// can let the correction pill's clicks through.
+const cbPillHosts = new WeakSet();
+if (typeof window !== "undefined") window.cbRegisterPillHost = (el) => { if (el) cbPillHosts.add(el); };
+function cbIsInPillHost(el) {
+  for (let p = el; p; p = p.parentElement) if (cbPillHosts.has(p)) return true;
+  return false;
+}
+
+// One capture-phase interceptor stops a blocked card's video link (/watch,
+// /shorts/) and any black-panel click from navigating, across pointerdown/
+// mousedown/click/auxclick (YouTube's lockup can navigate before `click`).
+// Author/channel links, tags and the pill stay live.
+let cbClickInterceptorInstalled = false;
+function cbBlockNavEvent(e) {
+  const t = e.target;
+  if (!t || typeof t.closest !== "function") return;
+  const card = t.closest('[data-cb-content-blocked="true"]');
+  if (!card || cbIsInPillHost(t)) return;
+  const inPanel = !!t.closest(".cb-block-panel");
+  const link = t.closest("a[href]");
+  const href = link ? (link.getAttribute("href") || "") : "";
+  if (inPanel || /\/watch|\/shorts\//.test(href)) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+  }
+}
+function cbInstallClickInterceptor() {
+  if (cbClickInterceptorInstalled || typeof document === "undefined") return;
+  cbClickInterceptorInstalled = true;
+  for (const type of ["pointerdown", "mousedown", "click", "auxclick"]) {
+    document.addEventListener(type, cbBlockNavEvent, true);
+  }
+}
+
+function cbEnsureRelative(el) {
+  if (!el) return;
+  if (el.dataset.cbPrevPos === undefined) el.dataset.cbPrevPos = el.style.position || "";
+  try { if (getComputedStyle(el).position === "static") el.style.position = "relative"; } catch {}
+}
+
+// Black out a card's thumbnail (idempotent; re-renders if the host recycled the
+// panel away). No controls — the block is driven purely by the tags.
+function dimElement(card) {
+  if (!card) return;
+  const media = cbFindMedia(card);
+  if (!media) return; // no thumbnail to black → skip, never black the whole card
+  const hasPanel = !!media.querySelector(":scope > .cb-block-panel");
+  if (card.dataset.cbContentBlocked === "true" && hasPanel) return;
+  card.dataset.cbContentBlocked = "true";
+  cbInstallClickInterceptor();
+  cbEnsureRelative(media);
+  media.querySelector(":scope > .cb-block-panel")?.remove();
+  const panel = document.createElement("div");
+  panel.className = "cb-block-panel";
+  panel.setAttribute("style", "position:absolute;inset:0;z-index:60;background:#000;");
+  media.appendChild(panel);
+}
+
+// allow verdict (or the tag no longer qualifies) → restore the card instantly.
+function undimElement(card) {
+  if (!card || card.dataset.cbContentBlocked !== "true") return;
+  const media = cbFindMedia(card) || card;
+  media.querySelector(":scope > .cb-block-panel")?.remove();
+  if (media.dataset.cbPrevPos !== undefined) {
+    if (media.dataset.cbPrevPos) media.style.position = media.dataset.cbPrevPos;
+    else media.style.removeProperty("position");
+    delete media.dataset.cbPrevPos;
+  }
+  delete card.dataset.cbContentBlocked;
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -657,10 +745,11 @@ function cbClearSourceEverywhere(source) {
 }
 
 // Resolve from the ordered ledger: the lowest-index (top-most) group with an
-// opinion decides. Returns true if the card should be hidden.
-function cbResolveCardHidden(card) {
+// opinion decides. Returns the winning verdict — "hide" | "dim" | "show".
+// ("allow" rescues resolve to "show"; no opinion → "show".)
+function cbResolveCardVerdict(card) {
   const entry = cbVerdictLedger.get(card);
-  if (!entry || entry.size === 0) return false;
+  if (!entry || entry.size === 0) return "show";
   let bestIndex = Infinity;
   let bestVerdict = null;
   for (const [groupId, value] of entry) {
@@ -672,13 +761,45 @@ function cbResolveCardHidden(card) {
       bestVerdict = value.v;
     }
   }
-  return bestVerdict === "hide";
+  if (bestVerdict === "hide") return "hide";
+  if (bestVerdict === "dim") return "dim";
+  return "show";
+}
+
+// Back-compat boolean wrapper (some callers only ask "is it hidden?").
+function cbResolveCardHidden(card) {
+  return cbResolveCardVerdict(card) === "hide";
 }
 
 function cbApplyCard(card) {
-  if (cbResolveCardHidden(card)) hideElement(card);
-  else showElement(card);
+  const verdict = cbResolveCardVerdict(card);
+  if (verdict === "hide") {
+    undimElement(card);
+    hideElement(card);
+  } else if (verdict === "dim") {
+    showElement(card);
+    dimElement(card);
+  } else {
+    undimElement(card);
+    showElement(card);
+  }
 }
+
+// ── Content-tag policy verdict source ──────────────────────────────────────
+// The app resolves each classified entry's platform policy (allow/dim/block on
+// content tags) and ships a per-entry `feedAction`. The tag pipeline calls this
+// with the card + that action. It's a first-class verdict source ("tag") in the
+// same ledger, so it composes with creator/custom rules: an explicit user
+// "allow" rescue or "hide" still wins (the tag group has no feedOrder index, so
+// it sits at lowest priority). DIM is the intended default — correctable.
+const CB_TAG_POLICY_GROUP_ID = "__vault_tag_policy__";
+function cbApplyTagPolicy(card, feedAction) {
+  if (!card) return;
+  const verdict = feedAction === "block" ? "hide" : feedAction === "dim" ? "dim" : null;
+  cbSetCardVerdict(card, CB_TAG_POLICY_GROUP_ID, verdict, "tag");
+  cbApplyCard(card);
+}
+if (typeof window !== "undefined") window.cbApplyTagPolicy = cbApplyTagPolicy;
 
 function collectNavElementsToHide(filter) {
   if (!filter || filter.authorMode !== "all") return [];
@@ -856,6 +977,11 @@ function applySurfaceHides() {
   // a `:has()` variant an older engine rejects) can't throw away every other
   // hide — previously a single bad selector left ALL widgets visible.
   for (const selector of latestSurfaceHides) {
+    const surfaceCardSite = parseSurfaceFeedCardsDirective(selector);
+    if (surfaceCardSite) {
+      for (const card of getFeedCardElements(surfaceCardSite)) hideSurfaceElement(card);
+      continue;
+    }
     let nodes = [];
     try { nodes = document.querySelectorAll(selector); } catch { continue; }
     for (const el of nodes) hideSurfaceElement(el);
@@ -1351,8 +1477,7 @@ function refreshPanels(extraPanelGroups = []) {
 
 if (/^https?:$/i.test(location.protocol)) {
   refreshSession();
-  // The page's channel identity resolves after initial load — re-evaluate so
-  // author groups can block the page, not just hide the feed.
+  // Author bylines may resolve after initial load, so refresh the page matcher.
   scheduleSessionResolveRetries();
 
   document.addEventListener("visibilitychange", () => {
@@ -3094,13 +3219,6 @@ function __cb_currentPlatform() {
   return null;
 }
 
-function __cb_videoFormToSlot(form) {
-  if (form === "short") return "shorts";
-  if (form === "long") return "videos";
-  if (form === "post") return "posts";
-  return null;
-}
-
 // The page's own channel identity when we're on a channel/author page, in the
 // same normalized shape getFeedCardCreators() produces (a bare handle, or a
 // channel:/c:/user: prefixed id). On a channel's OWN page the individual video
@@ -3189,12 +3307,27 @@ function __cb_extractCardItem(card, platform) {
     if (fallback) author = fallback;
   }
 
+  // Content-classifier tags for this card (from the Vault tag pipeline), so a
+  // custom content-block rule can match on WHAT the content is, not just its
+  // creator. Empty until the pill resolves; a resolved change re-evaluates via
+  // the signature below.
+  let tags = [];
+  try {
+    if (typeof window !== "undefined" && typeof window.vaultTagsForCard === "function") {
+      const resolved = window.vaultTagsForCard(card);
+      if (Array.isArray(resolved)) {
+        tags = resolved
+          .filter((t) => t && typeof t.name === "string")
+          .map((t) => ({ id: t.id, name: t.name, confidence: Number.isInteger(t.confidence) ? t.confidence : 0 }));
+      }
+    }
+  } catch {}
+
   return {
     url,
     name,
     title: name,
     author,
-    channelId: null,
     length: null,
     views: null,
     publishedAt: null,
@@ -3202,7 +3335,8 @@ function __cb_extractCardItem(card, platform) {
     live: null,
     sponsored: null,
     algorithmic: null,
-    videoForm
+    videoForm,
+    tags
   };
 }
 
@@ -3218,7 +3352,10 @@ function cbResetCustomSigCache() {
 }
 
 function cbCardSignature(item) {
-  return [item.url || "", item.title || "", item.videoForm || ""].join("\n");
+  const tagSig = Array.isArray(item.tags)
+    ? item.tags.map((t) => `${t.id || t.name}:${t.confidence || 0}`).sort().join(",")
+    : "";
+  return [item.url || "", item.title || "", item.videoForm || "", tagSig].join("\n");
 }
 
 // Returns the full sandbox reply { results, evaluatedGroups } (or null). The
@@ -3254,7 +3391,7 @@ async function __cb_scanFeedPredicates() {
   const bySlot = { shorts: [], videos: [], posts: [] };
   for (const card of cards) {
     const item = __cb_extractCardItem(card, platform);
-    const slot = __cb_videoFormToSlot(item.videoForm);
+    const slot = platformVideoFormToSlot(platform, item.videoForm);
     if (!slot) continue;
     if (!__cb_activePredicateSlots.has(platform + ":" + slot)) continue;
     const sig = cbCardSignature(item);
@@ -3448,7 +3585,7 @@ async function __cb_checkPagePredicate() {
   const platform = __cb_currentPlatform();
   if (!platform) return;
   const ctx = detectVideoSiteContext(normalizeHostname(location.hostname), location.pathname);
-  const slot = __cb_videoFormToSlot(ctx.form);
+  const slot = platformVideoFormToSlot(platform, ctx.form);
   if (!slot || !__cb_activePredicateSlots.has(platform + ":" + slot)) return;
 
   // Build the item from the actual video title rather than document.title.

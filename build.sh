@@ -27,7 +27,7 @@ echo "[safariBlocker] building safari web-extension package…"
 python3 "$CUSTOM_BLOCKER/tools/package.py" --target safari
 
 VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$CUSTOM_BLOCKER/manifest.safari.json")"
-ZIP="$CUSTOM_BLOCKER/dist/custom-web-blocker-safari-${VERSION}.zip"
+ZIP="$CUSTOM_BLOCKER/dist/AdamanciaVault-extension-safari-v${VERSION}.zip"
 
 if [ ! -f "$ZIP" ]; then
   echo "[safariBlocker] ERROR: expected package not found: $ZIP" >&2

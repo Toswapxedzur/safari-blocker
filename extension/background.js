@@ -25,9 +25,25 @@
 // manifest.background.scripts, so it is already loaded by this point.
 if (typeof importScripts === "function") {
   try {
-    importScripts("platform-profiles.js");
+    if (typeof CBBridgeProtocol === "undefined") importScripts("bridge-protocol.js");
+  } catch (error) {
+    console.error("[CustomBlocker] importScripts(bridge-protocol.js) failed", error);
+  }
+  try {
+    if (typeof CBLocalHubEnvironment === "undefined") importScripts("local-hub-environment.js");
+  } catch (error) {
+    console.error("[CustomBlocker] importScripts(local-hub-environment.js) failed", error);
+  }
+  try {
+    if (typeof PLATFORM_PROFILES === "undefined") importScripts("platform-profiles.js");
   } catch (error) {
     console.error("[CustomBlocker] importScripts(platform-profiles.js) failed", error);
+  }
+  try {
+    if (typeof VaultClassifierExtensionContract === "undefined") importScripts("vault-classifier-contract.js");
+    importScripts("vault-classifier-bridge.js", "local-hub-auth.js");
+  } catch (error) {
+    console.error("[CustomBlocker] importScripts(vault classifier bridge) failed", error);
   }
   try {
     importScripts("helpers.js");
@@ -81,6 +97,41 @@ const MS_PER_MINUTE = 60 * 1000;
 const MS_PER_HOUR = 60 * MS_PER_MINUTE;
 const MAX_HEARTBEAT_MS = 5000;
 const TRANSITION_ALARM_NAME = "custom-blocker-transition";
+const ACTION_ICON_NORMAL_PATHS = Object.freeze({
+  16: "icons/adamancia-vault-lock-v3-16.png",
+  32: "icons/adamancia-vault-lock-v3-32.png",
+  48: "icons/adamancia-vault-lock-v3-48.png"
+});
+const ACTION_ICON_INVERSE_DARK_PATHS = Object.freeze({
+  16: "icons/adamancia-vault-lock-inverse-dark-16.png",
+  32: "icons/adamancia-vault-lock-inverse-dark-32.png",
+  48: "icons/adamancia-vault-lock-inverse-dark-48.png"
+});
+let actionIconColorScheme = null;
+
+// Firefox has declarative action.theme_icons in its manifest. Chromium does
+// not, so its service worker applies the appropriate generated PNGs when the
+// long-lived offscreen document reports the system colour scheme. Firefox and
+// Safari have a DOM-bearing background page, while Chromium MV3 uses a worker.
+function supportsDynamicActionIcon() {
+  return typeof document === "undefined" && Boolean(chrome?.action?.setIcon);
+}
+
+async function syncActionIconColorScheme(prefersDark) {
+  if (!supportsDynamicActionIcon()) return false;
+  const next = prefersDark === true ? "dark" : "light";
+  if (next === actionIconColorScheme) return true;
+  try {
+    await chrome.action.setIcon({
+      path: next === "dark" ? ACTION_ICON_INVERSE_DARK_PATHS : ACTION_ICON_NORMAL_PATHS
+    });
+    actionIconColorScheme = next;
+    return true;
+  } catch (error) {
+    console.warn("[CustomBlocker] failed to update the toolbar icon colour scheme", error);
+    return false;
+  }
+}
 
 const DAY_NAMES = [
   "monday",
@@ -555,6 +606,8 @@ function normalizePageContext(input) {
       input?.videoForm === "post"
         ? input.videoForm
         : videoContext.form,
+    // The local Vault Classifier receives rendered evidence through its own
+    // dedicated adapter; page matching contains no remote classification state.
   };
 }
 
@@ -990,7 +1043,7 @@ function isPlatformBlockEnforcing(group, usageTimersMs) {
 
 function buildPlatformFeedFilters(pageContext, groups, usageTimersMs, groupSnoozes, now) {
   const filters = [];
-  const currentSite = pageContext.videoSite;
+  const currentSite = pageContext.videoSite || getPlatformGroupTypeForHost(pageContext.hostname);
   const orderedGroups = reversed(groups);
 
   if (currentSite) {
@@ -1005,7 +1058,6 @@ function buildPlatformFeedFilters(pageContext, groups, usageTimersMs, groupSnooz
         continue;
       }
       const authorMode = normalizePlatformAuthorMode(group.platformAuthorMode);
-      // "nobody" and the YouTube tag stubs don't trim the feed by author.
       if (authorMode !== "all" && authorMode !== "include" && authorMode !== "exclude") {
         continue;
       }
@@ -1050,10 +1102,10 @@ function buildPlatformFeedFilters(pageContext, groups, usageTimersMs, groupSnooz
     }
   }
 
-  if (pageContext.isTwitterPage) {
+  if (currentSite && isPlatformFeedGroupType(currentSite)) {
     for (const group of orderedGroups) {
       if (
-        group.groupType !== "twitter" ||
+        group.groupType !== currentSite ||
         !group.enabled ||
         !isGroupActiveNow(group, now) ||
         getActiveSnooze(group.id, groupSnoozes, now)
@@ -1061,13 +1113,13 @@ function buildPlatformFeedFilters(pageContext, groups, usageTimersMs, groupSnooz
         continue;
       }
       const authorMode = normalizePlatformAuthorMode(group.platformAuthorMode);
-      // mode "all" blocks the whole page (handled by the matcher); "nobody"
-      // blocks nothing. Only include/exclude trim the feed per-account.
+      // Mode "all" blocks the whole page (handled by the matcher); "nobody"
+      // blocks nothing. Only include/exclude trim individual feed cards.
       if (authorMode !== "include" && authorMode !== "exclude") continue;
       const enforce = isPlatformBlockEnforcing(group, usageTimersMs);
       filters.push({
         id: group.id,
-        site: "twitter",
+        site: currentSite,
         authorMode,
         authors: [...group.platformAuthors],
         enforce
@@ -1581,6 +1633,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "action-icon-color-scheme") {
+    syncActionIconColorScheme(message.prefersDark === true)
+      .then((ok) => sendResponse({ ok }))
+      .catch(() => sendResponse({ ok: false }));
+    return true;
+  }
+
   if (message?.type === "refresh-blocking-rules") {
     syncBlockingRules()
       .then(() => sendResponse({ ok: true }))
@@ -1931,6 +1990,38 @@ function pushLogFeedEntry(entry) {
   } catch (_) {}
 }
 
+// Collection diagnostics never include page text, titles, creator identities,
+// URLs, or entry IDs. They make the local collection hops inspectable in the
+// existing extension Activity Log without creating browser-side browsing data.
+function recordVaultClassifierDiagnostic(entry) {
+  if (!entry || typeof entry !== "object") return;
+  const event = typeof entry.event === "string" && /^[a-z0-9-]{1,64}$/.test(entry.event) ? entry.event : "invalid-event";
+  const platform = typeof entry.platform === "string" && /^[a-z0-9-]{1,64}$/.test(entry.platform) ? entry.platform : "unknown";
+  const detail = typeof entry.detail === "string" && /^[a-z0-9-]{1,64}$/.test(entry.detail) ? entry.detail : "";
+  const outcome = typeof entry.outcome === "string" && /^[a-z0-9-]{1,32}$/.test(entry.outcome) ? entry.outcome : "unknown";
+  const isFailure = event.endsWith("failed") || event.endsWith("rejected") || outcome === "unavailable" || outcome === "rejected";
+  pushLogFeedEntry({
+    level: isFailure ? "warn" : "log",
+    eventType: "vault-collection",
+    message: [platform, event, detail, outcome].filter(Boolean).join(" · ")
+  });
+}
+self.CBRecordVaultClassifierDiagnostic = recordVaultClassifierDiagnostic;
+
+// Transport diagnostics are deliberately local-only stage tokens. They help
+// distinguish an unavailable native peer from a service-worker startup race or
+// fallback socket failure without retaining page evidence or raw exception text.
+function recordVaultClassifierTransportDiagnostic(stage, outcome = "extension") {
+  if (typeof stage !== "string" || !/^[a-z0-9-]{1,48}$/.test(stage)) return;
+  if (typeof outcome !== "string" || !/^[a-z0-9-]{1,32}$/.test(outcome)) return;
+  recordVaultClassifierDiagnostic({
+    platform: "bridge",
+    event: `transport-${stage}`,
+    outcome
+  });
+}
+self.CBRecordVaultClassifierTransportDiagnostic = recordVaultClassifierTransportDiagnostic;
+
 function ingestSandboxLogs(result, descriptor) {
   if (!result) return;
   const eventType = descriptor && descriptor.type ? descriptor.type : "";
@@ -2176,9 +2267,13 @@ async function sendToEventSandbox(payload) {
   }
 }
 
-async function loadCustomGroupSource(group) {
+async function loadCustomGroupSource(group, { resetHostBlocks = false } = {}) {
   if (!group || group.groupType !== "custom") return null;
+  if (resetHostBlocks) {
+    await clearWindowBlockGroup(group.id);
+  }
   if (!group.enabled) {
+    await clearWindowBlockGroup(group.id);
     await sendToEventSandbox({
       kind: "unload-group",
       groupId: group.id,
@@ -2191,6 +2286,7 @@ async function loadCustomGroupSource(group) {
   }
   const source = typeof group.activeEventSource === "string" ? group.activeEventSource : "";
   if (!source.trim()) {
+    await clearWindowBlockGroup(group.id);
     await sendToEventSandbox({
       kind: "unload-group",
       groupId: group.id,
@@ -2229,7 +2325,9 @@ async function loadCustomGroupSource(group) {
 }
 
 async function unloadCustomGroupHandlers(groupId) {
-  return await sendToEventSandbox({ kind: "unload-group", groupId });
+  const result = await sendToEventSandbox({ kind: "unload-group", groupId });
+  await clearWindowBlockGroup(groupId);
+  return result;
 }
 
 let lastReconcileSnapshot = new Map();
@@ -2265,7 +2363,7 @@ async function reconcileCustomGroupHandlers(change) {
       before.activeEventSource !== snapshot.activeEventSource
     ) {
       const group = newGroups.find((g) => g.id === groupId);
-      await loadCustomGroupSource(group);
+      await loadCustomGroupSource(group, { resetHostBlocks: true });
     }
   }
   lastReconcileSnapshot = next;
@@ -2281,8 +2379,14 @@ async function loadAllCustomGroupsAtStartup() {
     await hydrateTabStateFromSession();
   } catch (_) {}
   try {
+    await hydrateWindowBlockGroups();
+  } catch (_) {}
+  try {
     const result = await chrome.storage.local.get(BLOCKED_GROUPS_KEY);
     const groups = Array.isArray(result[BLOCKED_GROUPS_KEY]) ? result[BLOCKED_GROUPS_KEY] : [];
+    await pruneWindowBlockGroups(new Set(
+      groups.filter((group) => group && group.groupType === "custom").map((group) => String(group.id || ""))
+    ));
     lastReconcileSnapshot = new Map();
     let attempted = 0;
     let withSource = 0;
@@ -2651,7 +2755,65 @@ async function applySandboxResultToTab(tabId, result, descriptor) {
 // Window helper: dynamic site blocklist + tab management
 // ────────────────────────────────────────────────────────────────────────
 
-const __windowBlockedSites = new Set();
+const SESSION_WINDOW_BLOCKS_KEY = "__cb_window_blocks_by_group__";
+const __windowBlockedSitesByGroup = new Map();
+let windowBlockPersistChain = Promise.resolve();
+
+function windowBlockSetForGroup(groupId, create = false) {
+  const id = String(groupId || "");
+  if (!id) return null;
+  let set = __windowBlockedSitesByGroup.get(id) || null;
+  if (!set && create) {
+    set = new Set();
+    __windowBlockedSitesByGroup.set(id, set);
+  }
+  return set;
+}
+
+async function persistWindowBlockGroups() {
+  if (!chrome?.storage?.session?.set) return;
+  const serialized = {};
+  for (const [groupId, patterns] of __windowBlockedSitesByGroup.entries()) {
+    if (patterns.size > 0) serialized[groupId] = Array.from(patterns);
+  }
+  windowBlockPersistChain = windowBlockPersistChain
+    .catch(() => {})
+    .then(() => chrome.storage.session.set({ [SESSION_WINDOW_BLOCKS_KEY]: serialized }));
+  try { await windowBlockPersistChain; } catch (_) {}
+}
+
+async function hydrateWindowBlockGroups() {
+  if (!chrome?.storage?.session?.get) return;
+  try {
+    const stored = await chrome.storage.session.get({ [SESSION_WINDOW_BLOCKS_KEY]: {} });
+    const groups = stored[SESSION_WINDOW_BLOCKS_KEY];
+    if (!groups || typeof groups !== "object") return;
+    __windowBlockedSitesByGroup.clear();
+    for (const [groupId, patterns] of Object.entries(groups)) {
+      if (!Array.isArray(patterns)) continue;
+      const set = new Set(
+        patterns.map(windowBlocklistNormalize).filter(Boolean)
+      );
+      if (set.size > 0) __windowBlockedSitesByGroup.set(groupId, set);
+    }
+  } catch (_) {}
+}
+
+async function clearWindowBlockGroup(groupId) {
+  if (!__windowBlockedSitesByGroup.delete(String(groupId || ""))) return;
+  await persistWindowBlockGroups();
+}
+
+async function pruneWindowBlockGroups(validGroupIds) {
+  let changed = false;
+  for (const groupId of Array.from(__windowBlockedSitesByGroup.keys())) {
+    if (!validGroupIds.has(groupId)) {
+      __windowBlockedSitesByGroup.delete(groupId);
+      changed = true;
+    }
+  }
+  if (changed) await persistWindowBlockGroups();
+}
 
 function windowBlocklistNormalize(pattern) {
   let p = String(pattern || "").trim().toLowerCase();
@@ -2664,12 +2826,14 @@ function windowBlocklistNormalize(pattern) {
 }
 
 function windowBlocklistMatches(url) {
-  if (__windowBlockedSites.size === 0) return false;
+  if (__windowBlockedSitesByGroup.size === 0) return false;
   try {
     let hostname = new URL(url).hostname.toLowerCase();
     if (hostname.startsWith("www.")) hostname = hostname.slice(4);
-    for (const pattern of __windowBlockedSites) {
-      if (hostname === pattern || hostname.endsWith("." + pattern)) return true;
+    for (const patterns of __windowBlockedSitesByGroup.values()) {
+      for (const pattern of patterns) {
+        if (hostname === pattern || hostname.endsWith("." + pattern)) return true;
+      }
     }
   } catch {}
   return false;
@@ -2703,16 +2867,26 @@ async function processWindowIntents(intents, originTabId) {
         break;
       }
       case "blockSite": {
+        const groupId = String(intent.groupId || "");
+        if (!groupId) break;
         const p = windowBlocklistNormalize(intent.pattern);
         if (p) {
-          __windowBlockedSites.add(p);
-          closeTabsMatchingBlocklist();
+          windowBlockSetForGroup(groupId, true).add(p);
+          await persistWindowBlockGroups();
+          await closeTabsMatchingBlocklist();
         }
         break;
       }
       case "unblockSite": {
+        const groupId = String(intent.groupId || "");
+        if (!groupId) break;
         const p = windowBlocklistNormalize(intent.pattern);
-        __windowBlockedSites.delete(p);
+        const patterns = windowBlockSetForGroup(groupId);
+        if (patterns) {
+          patterns.delete(p);
+          if (patterns.size === 0) __windowBlockedSitesByGroup.delete(groupId);
+          await persistWindowBlockGroups();
+        }
         break;
       }
     }
@@ -2720,7 +2894,7 @@ async function processWindowIntents(intents, originTabId) {
 }
 
 async function closeTabsMatchingBlocklist() {
-  if (__windowBlockedSites.size === 0) return;
+  if (__windowBlockedSitesByGroup.size === 0) return;
   try {
     const tabs = await chrome.tabs.query({});
     for (const tab of tabs) {
@@ -2978,7 +3152,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       groups[idx] = next;
       suppressReconcileLoadByGroup.add(groupId);
       await chrome.storage.local.set({ [BLOCKED_GROUPS_KEY]: groups });
-      const loadResult = await loadCustomGroupSource(next);
+      const loadResult = await loadCustomGroupSource(next, { resetHostBlocks: true });
       sendResponse({ ok: true, loadResult });
     })();
     return true;
@@ -3225,25 +3399,27 @@ ensureStartupGate().catch((error) => {
 /* ------------------------------------------------------------------ *
  * Web-app bridge — extension WebSocket client.
  *
- * The macOS app hosts the hub (a browser extension cannot listen on a
- * socket). This client connects out to that hub over a fixed loopback
- * address (no pairing code), and keeps a live status that the popup reads
+ * The extension keeps one automatic outbound socket to the fixed local Vault
+ * hub. Group-sync is routed whenever Mac Vault is present, while classifier
+ * requests are routed whenever Vault Classifier is present; both products
+ * share this one socket. It keeps a live status that the popup reads
  * via the "connection-status" message (and live "connection-status-push"
  * broadcasts while the popup is open).
  *
  * WebSocket activity keeps the MV3 service worker alive (Chrome 116+), so
  * the connection survives popup open/close. We also send a periodic ping.
  * ------------------------------------------------------------------ */
-const CB_CONNECTION_PROTOCOL_VERSION = 1;
-// Fixed loopback address for the macOS hub (port is no longer configurable).
-const CB_FIXED_ADDRESS = "ws://127.0.0.1:8787";
+const CB_CONNECTION_PROTOCOL_VERSION = self.CBBridgeProtocol.PROTOCOL_VERSION;
+// Environment-specific local address for the authenticated Vault hub. Unknown
+// extension identities fail closed rather than joining production.
+const CB_FIXED_ADDRESS = self.CBLocalHubEnvironment?.current?.address || "";
 const CB_CONNECTION_PING_MS = 20_000;
 // Four-state connection model (matches the UI):
 //   connecting   – actively probing; rapid burst every 100ms for a 5s window.
 //   disconnected – burst window elapsed without success; keep probing slowly
 //                  (every 5s) because the user still WANTS to connect.
 //   connected    – live socket.
-//   off          – user toggled the client off; no connection attempts at all.
+//   off          – transport has not started or is shutting down with the worker.
 const CB_CONNECTION_BURST_INTERVAL_MS = 100;
 const CB_CONNECTION_BURST_WINDOW_MS = 5_000;
 const CB_CONNECTION_SLOW_INTERVAL_MS = 5_000;
@@ -3302,16 +3478,12 @@ function cbReportClusterUsage(groups, timers, resets) {
   try {
     const clusters = Array.isArray(cbConnection.clusters) ? cbConnection.clusters : [];
     if (clusters.length === 0) return;
-    if (!cbConnection.ws || cbConnection.ws.readyState !== WebSocket.OPEN) return;
+    if (!cbConnection.routeIsReady("macapp")) return;
     const program = cbDetectProgramId();
     for (const g of groups) {
       if (!g || g.groupType !== "site") continue;
       const inCluster = clusters.some(
-        (c) =>
-          c &&
-          c.groupName === g.name &&
-          Array.isArray(c.members) &&
-          c.members.some((m) => m && m.program === program)
+        (cluster) => self.CBBridgeProtocol.clusterForGroup([cluster], g, program) === cluster
       );
       if (!inCluster) continue;
       const current = Number(timers && timers[g.id]) || 0;
@@ -3351,29 +3523,76 @@ function cbRebaseClusterUsage(groupId, sharedMs, resetAt) {
 const cbConnection = {
   ws: null,
   pingTimer: null,
+  connectTimer: null,
   reconnectTimer: null,
   desired: false,
   address: CB_FIXED_ADDRESS,
-  status: { running: false, state: "off", address: "", peers: [], error: "" },
+  status: { running: false, state: "off", address: "", peers: [], error: "", hubProgram: "" },
   // Latest web-app bridge clusters that involve this endpoint (hub is the source
   // of truth) and the last groups-announce we sent, so we can re-announce after
   // a reconnect even if the popup is closed.
   clusters: [],
   lastAnnounce: null,
   // Rapid-retry burst bookkeeping. burstStartMs marks the start of the current
-  // retry window; openedThisAttempt tracks whether the live socket connected.
+  // retry window. A raw WebSocket open is not a usable connection: the hub
+  // must also accept our protocol hello with a welcome message.
   burstStartMs: 0,
-  openedThisAttempt: false,
+  handshakeComplete: false,
+  startupReady: null,
 
   setStatus(patch) {
+    const macRouteWasReady = this.routeIsReady("macapp");
     this.status = { ...this.status, ...patch };
+    const macRouteIsReady = this.routeIsReady("macapp");
+    if (!macRouteIsReady && this.clusters.length > 0) {
+      this.clusters = [];
+      this.broadcastClusters();
+    } else if (!macRouteWasReady && macRouteIsReady && this.lastAnnounce) {
+      this.sendWS(this.lastAnnounce);
+    }
+    if (this.routeIsReady("classifier")
+      && typeof self.CBFlushVaultClassifierCollectionQueue === "function") {
+      void self.CBFlushVaultClassifierCollectionQueue();
+    }
     this.broadcast();
+  },
+
+  // A target is present when its native app owns the authenticated hub or is a
+  // currently connected peer on that hub.
+  targetIsPresent(target, status = this.status) {
+    if (!target || !status || typeof status !== "object") return false;
+    if (status.hubProgram === target) return true;
+    return Array.isArray(status.peers) && status.peers.some(
+      (peer) => peer && peer.program === target && peer.connected !== false
+    );
+  },
+
+  routeIsReady(target) {
+    return Boolean(
+      this.ws &&
+      this.ws.readyState === WebSocket.OPEN &&
+      (this.status.state === "connected" || this.status.state === "running") &&
+      this.targetIsPresent(target)
+    );
+  },
+
+  statusForTarget(target) {
+    const current = { ...this.status };
+    if (current.state === "connected" || current.state === "running") {
+      return {
+        ...current,
+        state: this.targetIsPresent(target, current) ? "connected" : "connected-not-listening",
+        error: ""
+      };
+    }
+    if (current.state === "error") return { ...current, state: "disconnected" };
+    return current;
   },
 
   broadcast() {
     try {
       chrome.runtime
-        .sendMessage({ type: "connection-status-push", status: this.status })
+        .sendMessage({ type: "connection-status-push", status: this.statusForTarget("macapp") })
         .catch(() => {});
     } catch (_) {}
   },
@@ -3410,7 +3629,8 @@ const cbConnection = {
     for (const cluster of relevant) {
       const scalars = cluster.shared.scalars;
       if (!scalars || typeof scalars !== "object") continue;
-      const idx = groups.findIndex((g) => g && g.name === cluster.groupName);
+      const localGroup = self.CBBridgeProtocol.groupForCluster(groups, cluster, program);
+      const idx = localGroup ? groups.findIndex((g) => g && g.id === localGroup.id) : -1;
       if (idx < 0) continue;
       for (const field of CB_SYNC_SCALAR_FIELDS) {
         if (
@@ -3448,7 +3668,7 @@ const cbConnection = {
         const shared = cluster.shared;
         if (!shared || (cluster.groupType && cluster.groupType !== "site")) continue;
         if (!Number.isFinite(shared.usageMs)) continue;
-        const grp = groups.find((g) => g && g.name === cluster.groupName);
+        const grp = self.CBBridgeProtocol.groupForCluster(groups, cluster, program);
         if (!grp || !grp.id) continue;
         const incoming = Math.max(0, Number(shared.usageMs) || 0);
         if ((Number(timers[grp.id]) || 0) !== incoming) {
@@ -3492,7 +3712,7 @@ const cbConnection = {
         if (!shared) continue;
         const sharedSnoozeTs = Number(shared.snoozeTs) || 0;
         if (sharedSnoozeTs <= 0 || !shared.snooze || typeof shared.snooze !== "object") continue;
-        const grp = groups.find((g) => g && g.name === cluster.groupName);
+        const grp = self.CBBridgeProtocol.groupForCluster(groups, cluster, program);
         if (!grp || !grp.id) continue;
         const localEntry = snoozes[grp.id];
         const localTs = localEntry ? Number(localEntry.startsAtMs) || 0 : 0;
@@ -3525,6 +3745,10 @@ const cbConnection = {
       clearInterval(this.pingTimer);
       this.pingTimer = null;
     }
+    if (this.connectTimer) {
+      clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -3546,80 +3770,71 @@ const cbConnection = {
     this.address = CB_FIXED_ADDRESS;
     this.clearTimers();
     this.closeSocket();
+    if (!this.address) {
+      this.desired = false;
+      this.setStatus({ state: "error", address: "", error: "unrecognized-extension-environment", peers: [], hubProgram: "" });
+      return;
+    }
     if (this.burstStartMs === 0) this.burstStartMs = Date.now();
-    this.setStatus({ state: "connecting", address: this.address, error: "" });
-    this.openedThisAttempt = false;
+    this.setStatus({ state: "connecting", address: this.address, error: "", hubProgram: "" });
+    this.handshakeComplete = false;
     let socket;
     try {
       socket = new WebSocket(this.address);
     } catch (error) {
-      this.setStatus({ state: "error", error: String(error && error.message ? error.message : error) });
+      this.setStatus({ state: "error", error: "socket-error" });
       this.scheduleSlowRetry();
       return;
     }
     this.ws = socket;
-    socket.onopen = () => {
-      this.openedThisAttempt = true;
-      // Connected — close the current retry window.
-      this.burstStartMs = 0;
-      try {
-        socket.send(
-          JSON.stringify({
-            kind: "hello",
-            v: CB_CONNECTION_PROTOCOL_VERSION,
-            program: cbDetectProgramId()
-          })
-        );
-      } catch (_) {}
-      // Re-announce our group roster so the hub can validate name-based links.
-      if (this.lastAnnounce) {
-        try {
-          socket.send(JSON.stringify(this.lastAnnounce));
-        } catch (_) {}
+    // A connection is usable only after the protocol welcome. Give the whole
+    // socket-open + hello/welcome exchange five seconds, then visibly settle
+    // on Disconnected while retaining the user's requested slow retry.
+    this.connectTimer = setTimeout(() => {
+      if (this.ws === socket && !this.handshakeComplete) {
+        this.connectTimer = null;
+        this.closeSocket();
+        this.burstStartMs = 0;
+        this.setStatus({ state: "disconnected", error: "connection-timeout", peers: [], hubProgram: "" });
+        this.scheduleSlowRetry();
       }
-      this.pingTimer = setInterval(() => {
-        try {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ kind: "ping", t: Date.now() }));
-          }
-        } catch (_) {}
-      }, CB_CONNECTION_PING_MS);
-    };
+    }, CB_CONNECTION_BURST_WINDOW_MS);
+    socket.onopen = () => {};
     socket.onmessage = (event) => {
       this.handleMessage(event && event.data);
     };
     socket.onerror = () => {
-      // A failure before the socket ever opened just means the Mac server isn't
+      // A failure before the socket ever opened means the shared broker isn't
       // reachable yet; let onclose drive the backed-off reconnect instead of
       // flapping the status to "error" on every attempt.
-      if (this.openedThisAttempt) {
-        this.setStatus({ state: "error", error: "socket error" });
+      if (this.handshakeComplete) {
+        this.setStatus({ state: "error", error: "socket-error" });
       }
     };
     socket.onclose = () => {
       this.clearTimers();
       this.ws = null;
       if (!this.desired) {
-        this.setStatus({ state: "off", peers: [] });
+        this.setStatus({ state: "off", peers: [], hubProgram: "" });
         return;
       }
-      if (this.openedThisAttempt) {
-        // A live connection dropped — start a fresh retry burst.
+      if (this.handshakeComplete) {
+        // A welcomed hub connection dropped — start a fresh retry burst.
         this.burstStartMs = 0;
-        this.setStatus({ state: "connecting", peers: [] });
+        this.setStatus({ state: "connecting", peers: [], hubProgram: "" });
         this.scheduleBurstRetry();
         return;
       }
       // Still trying to establish the first connection of this burst.
       if (Date.now() - this.burstStartMs < CB_CONNECTION_BURST_WINDOW_MS) {
-        this.setStatus({ state: "connecting", peers: [] });
+        this.setStatus({ state: "connecting", peers: [], hubProgram: "" });
         this.scheduleBurstRetry();
       } else {
         // Burst window elapsed without connecting. We still WANT to connect, so
-        // fall back to the slow retry cadence (every 5s) until the Mac server
+        // fall back to the slow retry cadence (every 5s) until the desktop hub
         // comes up. The user only stops attempts by toggling the client off.
         this.burstStartMs = 0;
-        this.setStatus({ state: "disconnected", peers: [] });
+        this.setStatus({ state: "disconnected", peers: [], hubProgram: "" });
         this.scheduleSlowRetry();
       }
     };
@@ -3644,11 +3859,11 @@ const cbConnection = {
     }, CB_CONNECTION_SLOW_INTERVAL_MS);
   },
 
-  disconnect() {
+  stop() {
     this.desired = false;
     this.clearTimers();
     this.closeSocket();
-    this.setStatus({ state: "off", peers: [], error: "" });
+    this.setStatus({ state: "off", peers: [], error: "", hubProgram: "" });
   },
 
   handleMessage(raw) {
@@ -3659,29 +3874,65 @@ const cbConnection = {
       return;
     }
     if (!msg || typeof msg !== "object") return;
+    if (msg.kind !== "challenge" && msg.kind !== "welcome" && msg.kind !== "rejected" && this.status.state !== "connected") return;
     switch (msg.kind) {
+      case "challenge":
+        if (
+          msg.v !== CB_CONNECTION_PROTOCOL_VERSION ||
+          typeof msg.challenge !== "string" ||
+          !/^[A-Za-z0-9_-]{43}$/.test(msg.challenge) ||
+          !self.CBLocalHubAuthentication ||
+          typeof self.CBLocalHubAuthentication.proofForChallenge !== "function"
+        ) {
+          this.authenticationFailed();
+          break;
+        }
+        this.answerChallenge(msg.challenge);
+        break;
       case "welcome":
+        if (
+          msg.v !== CB_CONNECTION_PROTOCOL_VERSION ||
+          !self.CBBridgeProtocol.isHubProgram(msg.hubProgram)
+        ) {
+          this.desired = false;
+          this.clearTimers();
+          this.closeSocket();
+          this.setStatus({ state: "error", error: "protocol-mismatch", peers: [], hubProgram: "" });
+          break;
+        }
+        if (this.connectTimer) {
+          clearTimeout(this.connectTimer);
+          this.connectTimer = null;
+        }
+        this.handshakeComplete = true;
+        this.burstStartMs = 0;
         this.setStatus({
           state: "connected",
           error: "",
+          hubProgram: msg.hubProgram,
           peers: Array.isArray(msg.peers) ? msg.peers : this.status.peers
         });
+        this.pingTimer = setInterval(() => {
+          this.sendWS({ kind: "ping", t: Date.now() });
+        }, CB_CONNECTION_PING_MS);
         break;
       case "rejected":
         this.desired = false;
         this.clearTimers();
         this.closeSocket();
-        this.setStatus({ state: "error", error: msg.reason || "rejected", peers: [] });
+        this.setStatus({ state: "error", error: msg.reason || "rejected", peers: [], hubProgram: "" });
         break;
       case "peers":
         this.setStatus({ peers: Array.isArray(msg.peers) ? msg.peers : [] });
         break;
       case "clusters":
+        if (!this.routeIsReady("macapp")) break;
         this.clusters = Array.isArray(msg.clusters) ? msg.clusters : [];
         this.broadcastClusters();
         this.applySharedToStorage();
         break;
       case "cluster-updated": {
+        if (!this.routeIsReady("macapp")) break;
         const next = Array.isArray(this.clusters) ? this.clusters.slice() : [];
         const idx = next.findIndex((c) => c && c.id === msg.cluster?.id);
         const members = Array.isArray(msg.cluster?.members) ? msg.cluster.members : [];
@@ -3698,6 +3949,7 @@ const cbConnection = {
         break;
       }
       case "connect-group-rejected":
+        if (!this.routeIsReady("macapp")) break;
         try {
           chrome.runtime
             .sendMessage({ type: "group-rejected", reason: msg.reason || "" })
@@ -3706,43 +3958,401 @@ const cbConnection = {
         break;
       case "pong":
         break;
+      case "classifier-response":
+        // The request map below ignores unmatched replies, so classifier
+        // responses cannot cross-route ordinary group-sync traffic.
+        if (self.CBClassifierHub) self.CBClassifierHub.receive(msg);
+        break;
+      case "classifier-broadcast":
+        // Unsolicited classifier push (a completed classification). No pending
+        // correlation: the vault bridge validates the body and fans it out to
+        // the platform's tabs.
+        if (self.CBClassifierBroadcastReceive) self.CBClassifierBroadcastReceive(msg);
+        break;
       default:
         break;
     }
   },
 
-  async applyFromSettings() {
-    let conn = null;
-    try {
-      const r = await chrome.storage.local.get(CB_GLOBAL_SETTINGS_KEY);
-      const s = r && r[CB_GLOBAL_SETTINGS_KEY];
-      conn = s && typeof s === "object" ? s.connection : null;
-    } catch (_) {}
-    if (conn && conn.clientEnabled) {
+  answerChallenge(challenge) {
+    const socket = this.ws;
+    if (!socket || socket.readyState !== WebSocket.OPEN || this.handshakeComplete) return;
+    const program = cbDetectProgramId();
+    self.CBLocalHubAuthentication.proofForChallenge(program, challenge)
+      .then((proof) => {
+        if (this.ws !== socket || socket.readyState !== WebSocket.OPEN || this.handshakeComplete) return;
+        socket.send(JSON.stringify({
+          kind: "hello",
+          v: CB_CONNECTION_PROTOCOL_VERSION,
+          program,
+          challenge,
+          proof
+        }));
+      })
+      .catch(() => this.authenticationFailed());
+  },
+
+  authenticationFailed() {
+    this.clearTimers();
+    this.closeSocket();
+    this.burstStartMs = 0;
+    this.setStatus({ state: "error", error: "authentication-unavailable", peers: [], hubProgram: "" });
+    this.scheduleSlowRetry();
+  },
+
+  waitForStartup() {
+    return this.startupReady || this.startAutomatically();
+  },
+
+  startAutomatically() {
+    if (!this.startupReady) this.startupReady = Promise.resolve();
+    if (!this.desired) {
       this.burstStartMs = 0;
       this.connect();
-    } else {
-      this.disconnect();
     }
+    return this.startupReady;
   }
 };
+
+// Classifier requests share the automatic local WebSocket and are relayed only
+// while a Vault Classifier host or peer is present.
+const CB_CLASSIFIER_HUB_MAX_PENDING = 16;
+// The native relay expires first (30 seconds), leaving this browser deadline
+// enough margin to receive its explicit timeout without racing a late reply.
+const CB_CLASSIFIER_HUB_TIMEOUT_MS = 32_000;
+const CB_CLASSIFIER_HUB_CONNECT_WAIT_MS = 5_000;
+const CB_CLASSIFIER_HUB_MAX_FALLBACK_REQUESTS = 4;
+// The cap bounds CONCURRENCY (in-flight requests), not total work. Overflow waits
+// in this bounded queue for a free slot instead of being dropped, so a dense feed
+// never loses a request. The queue bound is a far higher backstop against a true
+// runaway; normal feeds sit well under it.
+const CB_CLASSIFIER_HUB_MAX_QUEUE = 512;
+const cbClassifierHub = {
+  pending: new Map(),
+  waitQueue: [],
+  fallbackRequests: 0,
+
+  recordTransport(stage, outcome = "extension") {
+    try {
+      if (typeof self.CBRecordVaultClassifierTransportDiagnostic === "function") {
+        self.CBRecordVaultClassifierTransportDiagnostic(stage, outcome);
+      }
+    } catch (_) {}
+  },
+
+  isReady(connection) {
+    return Boolean(
+      connection &&
+      connection.ws &&
+      connection.ws.readyState === WebSocket.OPEN &&
+      connection.status &&
+      connection.status.state === "connected" &&
+      typeof connection.targetIsPresent === "function" &&
+      connection.targetIsPresent("classifier")
+    );
+  },
+
+  waitForReady(connection) {
+    if (this.isReady(connection)) return Promise.resolve();
+    // There is no active shared socket to wait for, or a live hub has already
+    // confirmed that it does not have a Classifier peer.
+    if (!connection || connection.status?.state === "connected") {
+      return Promise.reject(new Error("The Vault Classifier bridge is unavailable."));
+    }
+    return new Promise((resolve, reject) => {
+      const deadline = Date.now() + CB_CLASSIFIER_HUB_CONNECT_WAIT_MS;
+      const poll = () => {
+        if (this.isReady(connection)) {
+          resolve();
+        } else if (Date.now() >= deadline) {
+          reject(new Error("The Vault Classifier bridge is unavailable."));
+        } else {
+          setTimeout(poll, 100);
+        }
+      };
+      poll();
+    });
+  },
+
+  responseBody(message, operation) {
+    if (!message || message.operation !== operation) {
+      throw new Error("Vault Classifier returned an invalid response.");
+    }
+    if (typeof message.error === "string" && message.error.length <= 256) {
+      throw new Error(message.error);
+    }
+    if (!message.body || typeof message.body !== "object" || Array.isArray(message.body)) {
+      throw new Error("Vault Classifier returned an invalid response.");
+    }
+    let bodyJSON;
+    try {
+      bodyJSON = JSON.stringify(message.body);
+    } catch (_) {
+      throw new Error("Vault Classifier returned an invalid response.");
+    }
+    if (typeof bodyJSON !== "string" || new TextEncoder().encode(bodyJSON).length > 88_000) {
+      throw new Error("Vault Classifier response exceeds the shared bridge limit.");
+    }
+    return message.body;
+  },
+
+  requestOnSharedSocket(connection, operation, body) {
+    return new Promise((resolve, reject) => {
+      const job = { connection, operation, body, resolve, reject };
+      if (this.pending.size < CB_CLASSIFIER_HUB_MAX_PENDING) {
+        this.dispatchClassifierJob(job);
+      } else if (this.waitQueue.length < CB_CLASSIFIER_HUB_MAX_QUEUE) {
+        this.waitQueue.push(job);
+      } else {
+        reject(new Error("Vault Classifier is busy."));
+      }
+    });
+  },
+
+  dispatchClassifierJob(job) {
+    const { connection, operation, body, resolve, reject } = job;
+    const requestID = self.VaultClassifierExtensionContract.randomID("classifier");
+    const timer = setTimeout(() => {
+      if (!this.pending.has(requestID)) return;
+      this.pending.delete(requestID);
+      this.recordTransport("durable-timeout", "unavailable");
+      reject(new Error("Vault Classifier request timed out."));
+      this.drainWaitQueue();
+    }, CB_CLASSIFIER_HUB_TIMEOUT_MS);
+    this.pending.set(requestID, { operation, resolve, reject, timer });
+    if (!connection || typeof connection.sendWS !== "function" || !connection.sendWS({ kind: "classifier-request", requestID, operation, body })) {
+      clearTimeout(timer);
+      this.pending.delete(requestID);
+      this.recordTransport("durable-send-failed", "unavailable");
+      reject(new Error("The Vault Classifier bridge is unavailable."));
+      this.drainWaitQueue();
+    }
+  },
+
+  // A slot just freed (a response arrived, or a send failed/timed out): dispatch
+  // as many queued requests as the concurrency cap now allows.
+  drainWaitQueue() {
+    while (this.pending.size < CB_CLASSIFIER_HUB_MAX_PENDING && this.waitQueue.length > 0) {
+      this.dispatchClassifierJob(this.waitQueue.shift());
+    }
+  },
+
+  requestViaFallbackSocket(operation, body) {
+    if (this.fallbackRequests >= CB_CLASSIFIER_HUB_MAX_FALLBACK_REQUESTS) {
+      this.recordTransport("fallback-busy", "unavailable");
+      return Promise.reject(new Error("Vault Classifier is busy."));
+    }
+    this.fallbackRequests += 1;
+    const requestID = self.VaultClassifierExtensionContract.randomID("classifier-fallback");
+    return new Promise((resolve, reject) => {
+      let socket = null;
+      let settled = false;
+      let welcomed = false;
+      const finish = (completion, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        this.fallbackRequests = Math.max(0, this.fallbackRequests - 1);
+        if (socket) {
+          try {
+            socket.onopen = socket.onmessage = socket.onerror = socket.onclose = null;
+            socket.close();
+          } catch (_) {}
+        }
+        completion(value);
+      };
+      const fail = (stage, error) => {
+        this.recordTransport(stage, "unavailable");
+        finish(reject, error);
+      };
+      const timeout = setTimeout(
+        () => fail("fallback-timeout", new Error("Vault Classifier request timed out.")),
+        CB_CLASSIFIER_HUB_TIMEOUT_MS
+      );
+      try {
+        socket = new WebSocket(CB_FIXED_ADDRESS);
+      } catch (_) {
+        fail("fallback-constructor-failed", new Error("The Vault Classifier bridge is unavailable."));
+        return;
+      }
+      socket.onopen = () => {};
+      socket.onmessage = (event) => {
+        let message;
+        try {
+          message = typeof event?.data === "string" ? JSON.parse(event.data) : event?.data;
+        } catch (_) {
+          fail("fallback-invalid-frame", new Error("The Vault Classifier bridge is unavailable."));
+          return;
+        }
+        if (!message || typeof message !== "object") return;
+        if (message.kind === "challenge" && !welcomed) {
+          if (message.v !== CB_CONNECTION_PROTOCOL_VERSION || typeof message.challenge !== "string" || !self.CBLocalHubAuthentication) {
+            fail("fallback-authentication-unavailable", new Error("The Vault Classifier bridge is unavailable."));
+            return;
+          }
+          self.CBLocalHubAuthentication.proofForChallenge(cbDetectProgramId(), message.challenge)
+            .then((proof) => {
+              if (settled || !socket || socket.readyState !== WebSocket.OPEN) return;
+              socket.send(JSON.stringify({ kind: "hello", v: CB_CONNECTION_PROTOCOL_VERSION, program: cbDetectProgramId(), challenge: message.challenge, proof }));
+            })
+            .catch(() => fail("fallback-authentication-unavailable", new Error("The Vault Classifier bridge is unavailable.")));
+          return;
+        }
+        if (message.kind === "welcome" && !welcomed) {
+          const peers = Array.isArray(message.peers) ? message.peers : [];
+          const classifierPresent = message.hubProgram === "classifier" || peers.some((peer) => peer && peer.program === "classifier" && peer.connected !== false);
+          if (message.v !== CB_CONNECTION_PROTOCOL_VERSION || !self.CBBridgeProtocol.isHubProgram(message.hubProgram)) {
+            fail("fallback-invalid-welcome", new Error("The Vault Classifier bridge is unavailable."));
+            return;
+          }
+          if (!classifierPresent) {
+            fail("fallback-classifier-missing", new Error("The Vault Classifier bridge is unavailable."));
+            return;
+          }
+          welcomed = true;
+          try {
+            socket.send(JSON.stringify({ kind: "classifier-request", requestID, operation, body }));
+          } catch (_) {
+            fail("fallback-send-failed", new Error("The Vault Classifier bridge is unavailable."));
+          }
+          return;
+        }
+        if (message.kind === "classifier-response" && message.requestID === requestID) {
+          try {
+            finish(resolve, this.responseBody(message, operation));
+          } catch (error) {
+            fail("fallback-invalid-response", error);
+          }
+        }
+      };
+      socket.onerror = () => fail("fallback-socket-error", new Error("The Vault Classifier bridge is unavailable."));
+      socket.onclose = () => {
+        if (!settled) fail("fallback-socket-closed", new Error("The Vault Classifier bridge is unavailable."));
+      };
+    });
+  },
+
+  // Every operation the extension may send over the shared classifier route.
+  // Keep in sync with LocalClassifierHub.swift and ConnectionHub.swift — the
+  // parity suite (tests/runner-hub-op-parity.js) fails if the copies drift.
+  operations: ["bridge-info", "collection-info", "diagnostic", "collect", "video-tags", "video-tags-batch", "classifier-taxonomy", "submit-correction", "dev-log"],
+
+  request(operation, body) {
+    if (!this.operations.includes(operation)) {
+      // Loud on purpose: a silent rejection here once blackholed the pill
+      // pipeline AND its own dev-log diagnostics for days.
+      console.error("[CustomBlocker] Vault Classifier operation rejected by the extension allowlist:", operation);
+      return Promise.reject(new Error("Unsupported Vault Classifier operation."));
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return Promise.reject(new Error("Invalid Vault Classifier request."));
+    }
+    let bodyJSON;
+    try {
+      bodyJSON = JSON.stringify(body);
+    } catch (_) {
+      return Promise.reject(new Error("Invalid Vault Classifier request."));
+    }
+    if (typeof bodyJSON !== "string" || new TextEncoder().encode(bodyJSON).length > 88_000) {
+      return Promise.reject(new Error("Vault Classifier request exceeds the shared bridge limit."));
+    }
+    const connection = cbConnection;
+    const startupReady = connection && typeof connection.waitForStartup === "function"
+      ? connection.waitForStartup()
+      : Promise.resolve();
+    return Promise.resolve(startupReady)
+      .then(() => this.waitForReady(connection))
+      .then(
+        () => this.requestOnSharedSocket(connection, operation, body),
+        () => {
+          // A short-lived fallback can bridge a stale MV3 worker socket without
+          // adding another durable stream or persisting page evidence.
+          this.recordTransport("fallback-attempt", "extension");
+          return this.requestViaFallbackSocket(operation, body);
+        }
+      );
+  },
+
+  receive(message) {
+    const requestID = message && typeof message.requestID === "string" ? message.requestID : "";
+    const pending = requestID && this.pending.get(requestID);
+    if (!pending || !message || message.operation !== pending.operation) return;
+    this.pending.delete(requestID);
+    clearTimeout(pending.timer);
+    try {
+      pending.resolve(this.responseBody(message, pending.operation));
+    } catch (error) {
+      pending.reject(error);
+    }
+    this.drainWaitQueue();
+  },
+
+  rejectAll(reason) {
+    const error = new Error(reason || "The shared Vault bridge disconnected.");
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+    const queued = this.waitQueue.splice(0);
+    for (const job of queued) job.reject(error);
+  }
+};
+self.CBClassifierHub = cbClassifierHub;
+
+// ── DEBUG: measure classifier-bridge round-trip latency ──────────────────────
+// Run from the extension's service-worker console
+// (chrome://extensions → "Inspect views: service worker"):
+//   await CBVaultMeasureBridge()                       // ~pure connection (bridge-info)
+// `coldFirstMs` is the cold path (connect + hello/welcome handshake) only when
+// `warmAtStart` is false.
+async function cbMeasureBridge({ op = "bridge-info", count = 20, gapMs = 50, body } = {}) {
+  const requestBody = body || {};
+  const warmAtStart = cbClassifierHub.isReady(cbConnection);
+  const round2 = (value) => Math.round(value * 100) / 100;
+  const samples = [];
+  for (let i = 0; i < count; i += 1) {
+    const started = performance.now();
+    let ok = true;
+    let error = null;
+    try {
+      await cbClassifierHub.request(op, requestBody);
+    } catch (thrown) {
+      ok = false;
+      error = String((thrown && thrown.message) || thrown);
+    }
+    samples.push({ i, ms: round2(performance.now() - started), ok, error });
+    if (gapMs > 0 && i < count - 1) await new Promise((resolve) => setTimeout(resolve, gapMs));
+  }
+  // Exclude the first sample from the warm stats: it carries any connect cost.
+  const warm = samples.slice(1).filter((sample) => sample.ok).map((sample) => sample.ms).sort((a, b) => a - b);
+  const at = (p) => (warm.length ? warm[Math.min(warm.length - 1, Math.floor(p * warm.length))] : null);
+  const summary = {
+    op,
+    count,
+    warmAtStart,
+    failed: samples.filter((sample) => !sample.ok).length,
+    coldFirstMs: samples[0] ? samples[0].ms : null,
+    warmMin: warm[0] ?? null,
+    warmMedian: at(0.5),
+    warmP95: at(0.95),
+    warmMax: warm[warm.length - 1] ?? null,
+    warmMean: warm.length ? round2(warm.reduce((a, b) => a + b, 0) / warm.length) : null
+  };
+  console.table(samples);
+  console.log(`[CBVaultMeasureBridge] ${op}`, summary);
+  return summary;
+}
+self.CBVaultMeasureBridge = cbMeasureBridge;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message.type !== "string") return false;
   switch (message.type) {
-    case "connection-connect":
-      cbConnection.burstStartMs = 0;
-      cbConnection.connect();
-      sendResponse({ ok: true, status: cbConnection.status });
-      return false;
-    case "connection-disconnect":
-      cbConnection.disconnect();
-      sendResponse({ ok: true, status: cbConnection.status });
-      return false;
     case "connection-status":
-      sendResponse({ ok: true, status: cbConnection.status });
+      sendResponse({ ok: true, status: cbConnection.statusForTarget("macapp") });
       return false;
     case "group-connect":
+      if (!cbConnection.routeIsReady("macapp")) { sendResponse({ ok: false, error: "macapp-unavailable" }); return false; }
       cbConnection.sendWS({
         kind: "connect-group",
         groupName: message.groupName,
@@ -3753,6 +4363,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: true });
       return false;
     case "group-disconnect":
+      if (!cbConnection.routeIsReady("macapp")) { sendResponse({ ok: false, error: "macapp-unavailable" }); return false; }
       cbConnection.sendWS({
         kind: "disconnect-group",
         clusterId: message.clusterId,
@@ -3767,13 +4378,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         program: message.program,
         groups: Array.isArray(message.groups) ? message.groups : []
       };
-      cbConnection.sendWS(cbConnection.lastAnnounce);
+      if (cbConnection.routeIsReady("macapp")) cbConnection.sendWS(cbConnection.lastAnnounce);
       sendResponse({ ok: true });
       return false;
     case "clusters-status":
       sendResponse({ ok: true, clusters: cbConnection.clusters });
       return false;
     case "group-sync":
+      if (!cbConnection.routeIsReady("macapp")) { sendResponse({ ok: false, error: "macapp-unavailable" }); return false; }
       cbConnection.sendWS({
         kind: "group-sync",
         program: message.program,
@@ -3799,13 +4411,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-// Re-apply when the user toggles the client on/off or edits the address.
-if (chrome.storage && chrome.storage.onChanged) {
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local" || !changes[CB_GLOBAL_SETTINGS_KEY]) return;
-    cbConnection.applyFromSettings();
-  });
-}
+// Every service-worker lifetime participates in the authenticated local hub.
+cbConnection.startAutomatically();
 
-// Auto-connect on service-worker startup if the user left the client enabled.
-cbConnection.applyFromSettings();
+// ===========================================================================
