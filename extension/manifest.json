@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "__MSG_appName__",
-  "version": "1.2.0",
+  "version": "2.0.1",
   "description": "__MSG_appDescription__",
   "default_locale": "en",
   "permissions": ["storage", "alarms", "tabs", "webNavigation", "nativeMessaging"],
@@ -13,13 +13,13 @@
     "128": "icons/adamancia-vault-lock-v3-128.png"
   },
   "background": {
-    "scripts": ["browser-compat.js", "sandbox-transport.js", "helpers.js", "background.js"],
+    "scripts": ["browser-compat.js", "sandbox-transport.js", "bridge-protocol.js", "platform-profiles.js", "helpers.js", "background.js"],
     "persistent": false
   },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["browser-compat.js", "helpers.js", "content.js"],
+      "js": ["browser-compat.js", "platform-profiles.js", "helpers.js", "content.js"],
       "run_at": "document_idle"
     }
   ],
