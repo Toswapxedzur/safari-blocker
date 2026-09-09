@@ -181,21 +181,6 @@ const cbDialog = (function () {
 
 // Extension-wide preferences. Keep these defaults in sync with the
 // placeholder text in popup.html's Settings modal.
-// Web-app bridge (connection) defaults. The macOS app is the only endpoint
-// that can host the local hub (a browser extension cannot listen on a socket),
-// so `server*` fields are honored only on the native host and `client*` fields
-// only in the browser extensions. Both are persisted in globalSettings so the
-// transport layer (background service worker / native server) can read them.
-const CONNECTION_PROTOCOL_VERSION = 1;
-const CONNECTION_DEFAULT_PORT = 8787;
-const CONNECTION_DEFAULT_ADDRESS = `ws://127.0.0.1:${CONNECTION_DEFAULT_PORT}`;
-const DEFAULT_CONNECTION_SETTINGS = {
-  // macOS hub
-  serverEnabled: false,
-  // browser client
-  clientEnabled: false
-};
-
 const DEFAULT_GLOBAL_SETTINGS = {
   tickRateMs: 1000,
   autosaveDebounceMs: 400,
@@ -206,16 +191,13 @@ const DEFAULT_GLOBAL_SETTINGS = {
   debugMode: false,
   showOnPageLogToasts: true,
   defaultSnoozeMinutes: 30,
-  defaultFallbackUrl: "about:blank",
-  connection: { ...DEFAULT_CONNECTION_SETTINGS }
+  defaultFallbackUrl: "about:blank"
 };
 const TICK_RATE_MIN_MS = 250;
 const TICK_RATE_MAX_MS = 60_000;
 const AUTOSAVE_DEBOUNCE_MAX_MS = 5_000;
 
-// True when running inside the macOS app's WKWebView (the native chrome shim),
-// false in a real browser extension. Used to decide whether this endpoint is
-// the connection HUB (macOS, hosts the server) or a CLIENT (browser).
+// Native and browser clients both connect out to the shared broker.
 function isNativeHost() {
   try {
     return !!(window.chrome && window.chrome.__cbShim);
@@ -227,7 +209,7 @@ function isNativeHost() {
 // Stable identifier for this endpoint's "program", shown in the per-group
 // connection panel's program picker (macapp / chrome / edge / firefox / ...).
 function detectProgramId() {
-  if (isNativeHost()) return "macapp";
+  if (isNativeHost()) return window.CBBridgeProtocol.nativeProgramId(window.__CB_DESKTOP_PROGRAM_ID);
   let ua = "";
   try {
     ua = navigator.userAgent || "";
@@ -241,7 +223,7 @@ function detectProgramId() {
 }
 
 const LOCAL_PROGRAM_ID = detectProgramId();
-const IS_CONNECTION_HUB = isNativeHost();
+const IS_NATIVE_DESKTOP = isNativeHost();
 
 const DEFAULT_ALLOWED_MINUTES = 15;
 const DEFAULT_RESET_INTERVAL_HOURS = 24;
@@ -250,6 +232,7 @@ const DEFAULT_SNOOZE_MINUTES = 30;
 const DEFAULT_SNOOZE_ACTIVATION_DELAY_MINUTES = 0;
 const DEFAULT_SNOOZE_COOLDOWN_MINUTES = 0;
 const DEFAULT_GROUP_TYPE = "site";
+const DEFAULT_PLATFORM_RULE_GROUP_TYPE = "youtube";
 const MAX_STRICT_FREEZE_HOURS = 72;
 const MAX_SNOOZE_COOLDOWN_MINUTES = 5;
 const MS_PER_SECOND = 1000;
@@ -306,6 +289,7 @@ const blockingRulesField = document.getElementById("blockingRules");
 const blockingRulesLint = document.getElementById("blockingRulesLint");
 const openRuleTemplatesButton = document.getElementById("openRuleTemplatesButton");
 const platformRulesCard = document.getElementById("platformRulesCard");
+const platformRulePlatformField = document.getElementById("platformRulePlatform");
 const platformVideoCard = document.getElementById("platformVideoFields");
 const platformVideoTitle = document.getElementById("platformRulesTitle");
 const platformVideoCopy = document.getElementById("platformRulesCopy");
@@ -337,6 +321,8 @@ const discordTargetsField = document.getElementById("discordTargets");
 const discordBlockHomePageField = document.getElementById("discordBlockHomePage");
 const surfaceHidesSection = document.getElementById("surfaceHidesSection");
 const surfaceHidesList = document.getElementById("surfaceHidesList");
+const surfaceHidesTitle = document.getElementById("surfaceHidesTitle");
+const surfaceHidesHelp = document.getElementById("surfaceHidesHelp");
 const fallbackUrlSection = document.getElementById("fallbackUrlSection");
 const fallbackUrlField = document.getElementById("fallbackUrl");
 const groupEffectSection = document.getElementById("groupEffectSection");
@@ -362,6 +348,8 @@ const endSnoozeButton = document.getElementById("endSnoozeButton");
 const snoozeNumericFields = document.getElementById("snoozeNumericFields");
 const snoozeCustomCopy = document.getElementById("snoozeCustomCopy");
 const siteSettingsSection = document.getElementById("siteSettingsSection");
+const siteSettingsLabel = document.getElementById("siteSettingsLabel");
+const siteAllowlistField = document.getElementById("siteAllowlist");
 const blockedSitesField = document.getElementById("blockedSites");
 const blockedSitesList = document.getElementById("blockedSitesList");
 const siteAddPanel = document.getElementById("siteAddPanel");
@@ -401,26 +389,15 @@ const settingsTickRateField = document.getElementById("settingsTickRate");
 const settingsAutosaveDebounceField = document.getElementById("settingsAutosaveDebounce");
 const settingsDebugModeField = document.getElementById("settingsDebugMode");
 const settingsShowOnPageLogToastsField = document.getElementById("settingsShowOnPageLogToasts");
-const ytTierCountPending = document.getElementById("ytTierPendingCount");
-const ytTierCountProtected = document.getElementById("ytTierProtectedCount");
-const ytTierCountProbation = document.getElementById("ytTierProbationCount");
 const settingsDefaultSnoozeMinutesField = document.getElementById("settingsDefaultSnoozeMinutes");
 const settingsDefaultFallbackUrlField = document.getElementById("settingsDefaultFallbackUrl");
 const localFolderChooseButton = document.getElementById("localFolderChooseButton");
 const localFolderRevokeButton = document.getElementById("localFolderRevokeButton");
 const localFolderStatus = document.getElementById("localFolderStatus");
+let localFolderHandle = null;
 const settingsResetButton = document.getElementById("settingsResetButton");
 const settingsStatus = document.getElementById("settingsStatus");
-const connectionSection = document.getElementById("connectionSection");
-const connectionServerControls = document.getElementById("connectionServerControls");
-const connectionClientControls = document.getElementById("connectionClientControls");
-const connectionServerToggle = document.getElementById("connectionServerToggle");
-const connectionConnectButton = document.getElementById("connectionConnectButton");
-const connectionDisconnectButton = document.getElementById("connectionDisconnectButton");
-const connectionStatusDot = document.getElementById("connectionStatusDot");
-const connectionStatusText = document.getElementById("connectionStatusText");
-const connectionAddressReadout = document.getElementById("connectionAddressReadout");
-const connectionPeerList = document.getElementById("connectionPeerList");
+const classifierCollectionToggle = document.getElementById("classifierCollectionToggle");
 const connectionGroupSection = document.getElementById("connectionGroupSection");
 const connectionGroupHint = document.getElementById("connectionGroupHint");
 const connectionGroupDisconnected = document.getElementById("connectionGroupDisconnected");
@@ -494,6 +471,49 @@ const state = {
   // hub re-pushes every second) don't trigger needless re-renders.
   clustersLastJSON: ""
 };
+
+// This remains separate from the group-sync connection. Its browser evidence
+// requests share the public broker but never receive a group definition.
+const CLASSIFIER_BRIDGE_SETTINGS_KEY = "vaultClassifierSettings";
+const DEFAULT_CLASSIFIER_BRIDGE_SETTINGS = Object.freeze({
+  collectionEnabled: true
+});
+let classifierBridgeSettings = { ...DEFAULT_CLASSIFIER_BRIDGE_SETTINGS };
+
+function sanitizeClassifierBridgeSettings(raw) {
+  return {
+    // Existing deliberate opt-outs stay off; new extension settings collect by
+    // default once the matching local app platform is enabled.
+    collectionEnabled: !raw || raw.collectionEnabled !== false
+  };
+}
+
+function classifierBridgeStorageGet() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([CLASSIFIER_BRIDGE_SETTINGS_KEY], (result) => {
+      resolve(sanitizeClassifierBridgeSettings(result && result[CLASSIFIER_BRIDGE_SETTINGS_KEY]));
+    });
+  });
+}
+
+function classifierBridgeStorageSet(next) {
+  classifierBridgeSettings = sanitizeClassifierBridgeSettings(next);
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.set({ [CLASSIFIER_BRIDGE_SETTINGS_KEY]: classifierBridgeSettings }, () => {
+      const error = chrome.runtime.lastError;
+      error ? reject(new Error(error.message)) : resolve(classifierBridgeSettings);
+    });
+  });
+}
+
+function renderClassifierBridgeSettings() {
+  if (classifierCollectionToggle) classifierCollectionToggle.checked = classifierBridgeSettings.collectionEnabled;
+}
+
+async function loadClassifierBridgeSettings() {
+  classifierBridgeSettings = await classifierBridgeStorageGet();
+  renderClassifierBridgeSettings();
+}
 
 function getAiPromptStorageKey(groupId) {
   return `${AI_PROMPT_STORAGE_PREFIX}${groupId}`;
@@ -610,25 +630,16 @@ function loadLanguage() {
 
 async function fetchManualMarkdown(languageCode) {
   const candidates = languageCode === "en" ? ["en"] : [languageCode, "en"];
-
   for (const candidate of candidates) {
-    if (state.manualCache[candidate]) {
-      return state.manualCache[candidate];
-    }
-
+    if (state.manualCache[candidate]) return state.manualCache[candidate];
     try {
       const response = await fetch(chrome.runtime.getURL(`manual/${candidate}.md`));
-
-      if (!response.ok) {
-        continue;
-      }
-
+      if (!response.ok) continue;
       const markdown = await response.text();
       state.manualCache[candidate] = markdown;
       return markdown;
     } catch {}
   }
-
   throw new Error(t("manual.error"));
 }
 
@@ -640,13 +651,8 @@ async function loadManualContent() {
     const markdown = await fetchManualMarkdown(state.language);
     manualStatus.textContent = "";
     let html = renderMarkdownToHtml(markdown);
-    // Non-English manuals are machine-translated. Surface that up-front
-    // so a reader does not mistake an MT artefact for an authoritative
-    // statement. The banner itself is localized via the standard
-    // translation pipeline.
     if (state.language && state.language !== "en") {
-      const bannerText = escapeHtml(t("manual.mtBanner"));
-      html = `<blockquote class="mt-banner">${bannerText}</blockquote>${html}`;
+      html = `<blockquote class="mt-banner">${escapeHtml(t("manual.mtBanner"))}</blockquote>${html}`;
     }
     manualContent.innerHTML = html;
   } catch (error) {
@@ -729,23 +735,32 @@ async function localFolderDbDelete(key) {
   });
 }
 
+function setLocalFolderChooseButtonLabel(key) {
+  if (!localFolderChooseButton) return;
+  localFolderChooseButton.textContent = t(key);
+}
+
 async function renderLocalFolderStatus() {
   if (!localFolderStatus) return;
   if (!("showDirectoryPicker" in window)) {
+    localFolderHandle = null;
     localFolderStatus.textContent = t("settings.localFolderUnsupported");
     if (localFolderChooseButton) localFolderChooseButton.disabled = true;
     if (localFolderRevokeButton) localFolderRevokeButton.disabled = true;
     return;
   }
   if (localFolderChooseButton) localFolderChooseButton.disabled = false;
+  setLocalFolderChooseButtonLabel("settings.localFolderChoose");
   try {
     const handle = await localFolderDbGet(LOCAL_FOLDER_ROOT_KEY);
     const metadata = await localFolderDbGet(LOCAL_FOLDER_META_KEY);
     if (!handle || handle.kind !== "directory") {
+      localFolderHandle = null;
       localFolderStatus.textContent = t("settings.localFolderStatusNone");
       if (localFolderRevokeButton) localFolderRevokeButton.disabled = true;
       return;
     }
+    localFolderHandle = handle;
     if (localFolderRevokeButton) localFolderRevokeButton.disabled = false;
     const name = handle.name || metadata?.name || t("settings.localFolderUnknownName");
     let permission = "granted";
@@ -755,9 +770,11 @@ async function renderLocalFolderStatus() {
     if (permission === "granted") {
       localFolderStatus.textContent = t("settings.localFolderStatusConnected").replace("{name}", name);
     } else {
+      setLocalFolderChooseButtonLabel("settings.localFolderReconnect");
       localFolderStatus.textContent = t("settings.localFolderStatusNeedsPermission").replace("{name}", name);
     }
   } catch (error) {
+    localFolderHandle = null;
     localFolderStatus.textContent = String(error?.message ?? error);
     if (localFolderRevokeButton) localFolderRevokeButton.disabled = true;
   }
@@ -770,6 +787,20 @@ async function chooseLocalFolder() {
   }
   if (localFolderStatus) localFolderStatus.textContent = t("settings.localFolderChoosing");
   try {
+    // A stored handle commonly becomes "prompt" after Chrome restarts. Ask
+    // for that same handle first, from this button's user gesture, so a user
+    // can restore access without selecting the folder all over again.
+    const existingHandle = localFolderHandle;
+    if (existingHandle?.kind === "directory" && typeof existingHandle.requestPermission === "function") {
+      const existingPermission = await existingHandle.requestPermission({ mode: "readwrite" });
+      if (existingPermission === "granted") {
+        await renderLocalFolderStatus();
+        return;
+      }
+      if (localFolderStatus) localFolderStatus.textContent = t("settings.localFolderPermissionDenied");
+      return;
+    }
+
     const handle = await window.showDirectoryPicker({ mode: "readwrite" });
     let permission = "granted";
     if (typeof handle.requestPermission === "function") {
@@ -783,6 +814,7 @@ async function chooseLocalFolder() {
       name: handle.name || "",
       grantedAt: Date.now()
     });
+    localFolderHandle = handle;
     await renderLocalFolderStatus();
   } catch (error) {
     if (localFolderStatus) {
@@ -796,102 +828,8 @@ async function chooseLocalFolder() {
 async function revokeLocalFolder() {
   await localFolderDbDelete(LOCAL_FOLDER_ROOT_KEY);
   await localFolderDbDelete(LOCAL_FOLDER_META_KEY);
+  localFolderHandle = null;
   await renderLocalFolderStatus();
-}
-
-function getConnectionSettings() {
-  const s = state.globalSettings || DEFAULT_GLOBAL_SETTINGS;
-  return sanitizeConnectionSettings(s.connection);
-}
-
-// Persist a partial change to the connection block of globalSettings, then ask
-// the transport layer to apply it. Used by the server toggle / connect buttons.
-async function updateConnectionSettings(patch) {
-  const current = getConnectionSettings();
-  const next = sanitizeConnectionSettings({ ...current, ...patch });
-  state.globalSettings = sanitizeGlobalSettings({
-    ...(state.globalSettings || DEFAULT_GLOBAL_SETTINGS),
-    connection: next
-  });
-  try {
-    await chrome.storage.local.set({ [GLOBAL_SETTINGS_KEY]: state.globalSettings });
-  } catch (_) {}
-  return next;
-}
-
-function connectionStatusLabel(status) {
-  switch (status && status.state) {
-    case "running":
-      return t("connection.statusRunning");
-    case "connected":
-      return t("connection.statusConnected");
-    case "connecting":
-      return t("connection.statusConnecting");
-    case "error":
-      return status.error
-        ? t("connection.statusError") + ": " + status.error
-        : t("connection.statusError");
-    case "disconnected":
-      return t("connection.statusDisconnected");
-    default:
-      return t("connection.statusOff");
-  }
-}
-
-function renderConnectionSettings() {
-  if (!connectionSection) return;
-  const conn = getConnectionSettings();
-  const status = state.connectionStatus || {};
-
-  if (connectionServerControls) {
-    connectionServerControls.classList.toggle("hidden", !IS_CONNECTION_HUB);
-  }
-  if (connectionClientControls) {
-    connectionClientControls.classList.toggle("hidden", IS_CONNECTION_HUB);
-  }
-
-  if (IS_CONNECTION_HUB) {
-    if (connectionServerToggle) connectionServerToggle.checked = Boolean(conn.serverEnabled);
-  } else {
-    const connected = status.state === "connected" || status.state === "connecting";
-    if (connectionConnectButton) connectionConnectButton.classList.toggle("hidden", connected);
-    if (connectionDisconnectButton)
-      connectionDisconnectButton.classList.toggle("hidden", !connected);
-  }
-
-  const activeState = status.state || "off";
-  if (connectionStatusDot) {
-    connectionStatusDot.className = "connection-dot " + activeState;
-  }
-  if (connectionStatusText) {
-    connectionStatusText.textContent = connectionStatusLabel(status);
-  }
-  if (connectionAddressReadout) {
-    connectionAddressReadout.textContent = status.address || CONNECTION_DEFAULT_ADDRESS;
-  }
-
-  if (connectionPeerList) {
-    connectionPeerList.textContent = "";
-    const peers = Array.isArray(status.peers) ? status.peers : [];
-    if (peers.length === 0) {
-      const empty = document.createElement("p");
-      empty.className = "field-help";
-      empty.textContent = t("connection.noPeers");
-      connectionPeerList.appendChild(empty);
-    } else {
-      for (const peer of peers) {
-        const row = document.createElement("div");
-        row.className = "connection-peer";
-        const dot = document.createElement("span");
-        dot.className = "connection-dot " + (peer.connected ? "connected" : "off");
-        const label = document.createElement("span");
-        label.textContent = peer.program || peer.id || "?";
-        row.appendChild(dot);
-        row.appendChild(label);
-        connectionPeerList.appendChild(row);
-      }
-    }
-  }
 }
 
 // The transport layer pushes the live connection status here (native server on
@@ -904,9 +842,9 @@ function applyConnectionStatus(raw) {
     state: typeof incoming.state === "string" ? incoming.state : "off",
     address: typeof incoming.address === "string" ? incoming.address : "",
     peers: Array.isArray(incoming.peers) ? incoming.peers : [],
-    error: typeof incoming.error === "string" ? incoming.error : ""
+    error: typeof incoming.error === "string" ? incoming.error : "",
+    hubProgram: window.CBBridgeProtocol.hubProgramFromStatus(incoming)
   };
-  if (state.isSettingsOpen) renderConnectionSettings();
   // The per-group panel lives in the editor (always visible), so keep it fresh.
   refreshConnectionGroupPanel();
   if (!wasOnline && bridgeIsOnline()) {
@@ -941,7 +879,8 @@ function requestConnectionStatus() {
 // ---------------------------------------------------------------------------
 
 const CONNECTION_PROGRAM_LABELS = {
-  macapp: "Mac app",
+  macapp: "Mac Vault",
+  windowsapp: "Windows Vault",
   chrome: "Chrome",
   edge: "Edge",
   firefox: "Firefox",
@@ -993,36 +932,17 @@ function clusterOfflineMembers(cluster) {
 // re-creating one with the same name does NOT re-adopt the old cluster. Falls
 // back to the saved name for pre-id-pinning hubs that don't send a groupId.
 function groupConnectionCluster(group) {
-  if (!group) return null;
-  const clusters = Array.isArray(state.clusters) ? state.clusters : [];
-  return (
-    clusters.find((cluster) =>
-      Array.isArray(cluster.members) &&
-      cluster.members.some(
-        (m) =>
-          m &&
-          m.program === LOCAL_PROGRAM_ID &&
-          (m.groupId ? m.groupId === group.id : m.groupName === group.name)
-      )
-    ) || null
-  );
+  return window.CBBridgeProtocol.clusterForGroup(state.clusters, group, LOCAL_PROGRAM_ID);
 }
 
 // This endpoint's local group for a cluster, resolved via the member's pinned
 // group id (falling back to the saved name for pre-id-pinning hubs).
 function clusterLocalGroup(cluster) {
-  if (!cluster || !Array.isArray(cluster.members)) return null;
-  const self = cluster.members.find((m) => m && m.program === LOCAL_PROGRAM_ID);
-  if (!self) return null;
-  if (self.groupId) {
-    const byId = state.groups.find((g) => g.id === self.groupId);
-    if (byId) return byId;
-  }
-  return state.groups.find((g) => g.name === (self.groupName || cluster.groupName)) || null;
+  return window.CBBridgeProtocol.groupForCluster(state.groups, cluster, LOCAL_PROGRAM_ID);
 }
 
 // Programs the user can link to right now (other connected endpoints). A client
-// is always implicitly connected to the Mac hub; the hub sees its peers.
+// is implicitly connected to the authenticated native hub; the hub sees peers.
 function bridgeConnectablePrograms() {
   if (!bridgeIsOnline()) return [];
   const status = state.connectionStatus || {};
@@ -1031,8 +951,14 @@ function bridgeConnectablePrograms() {
   for (const peer of peers) {
     if (peer && peer.connected !== false && peer.program) programs.add(peer.program);
   }
-  if (!IS_CONNECTION_HUB) programs.add("macapp");
+  if (!IS_NATIVE_DESKTOP) {
+    const hubProgram = window.CBBridgeProtocol.hubProgramFromStatus(status);
+    if (hubProgram) programs.add(hubProgram);
+  }
   programs.delete(LOCAL_PROGRAM_ID);
+  // Vault Classifier shares this hub for routed decisions only. It never owns
+  // a block-group roster, so it is not a valid group-link destination.
+  programs.delete("classifier");
   programs.delete("browser");
   programs.delete("");
   return Array.from(programs);
@@ -1367,6 +1293,7 @@ const SYNC_SCALAR_FIELDS = [
   "strictFreezeHours",
   "frozenAtMs",
   "blockHomePage",
+  "allowlist",
   "fallbackUrl",
   "skipToNextOnBlock"
 ];
@@ -1374,7 +1301,7 @@ const SYNC_SCALAR_FIELDS = [
 // This endpoint owns (can edit + contributes) one blocked-list type: the Mac
 // owns apps, browsers own domains. The other type is a read-only mirror.
 function bridgeOwnsApps() {
-  return IS_CONNECTION_HUB;
+  return IS_NATIVE_DESKTOP;
 }
 
 function buildSyncContribution(group) {
@@ -1530,7 +1457,6 @@ function syncAllClusters() {
 
 function syncSettingsFormFromState() {
   const s = state.globalSettings || DEFAULT_GLOBAL_SETTINGS;
-  renderConnectionSettings();
   if (settingsTickRateField) settingsTickRateField.value = String(s.tickRateMs);
   if (settingsAutosaveDebounceField) settingsAutosaveDebounceField.value = String(s.autosaveDebounceMs);
   if (settingsDebugModeField) settingsDebugModeField.checked = Boolean(s.debugMode);
@@ -1544,6 +1470,7 @@ function openSettings() {
   state.isSettingsOpen = true;
   syncSettingsFormFromState();
   requestConnectionStatus();
+  loadClassifierBridgeSettings().catch(() => renderClassifierBridgeSettings());
   settingsModal.classList.remove("hidden");
   renderLocalFolderStatus().catch((error) => {
     if (localFolderStatus) localFolderStatus.textContent = String(error?.message ?? error);
@@ -2131,14 +2058,6 @@ function clampNumber(value, min, max, fallback) {
   return Math.max(min, Math.min(max, parsed));
 }
 
-function sanitizeConnectionSettings(raw) {
-  const src = raw && typeof raw === "object" ? raw : {};
-  return {
-    serverEnabled: src.serverEnabled === true,
-    clientEnabled: src.clientEnabled === true
-  };
-}
-
 function sanitizeGlobalSettings(raw) {
   const src = raw && typeof raw === "object" ? raw : {};
   const tickRateMs = Math.round(
@@ -2167,8 +2086,7 @@ function sanitizeGlobalSettings(raw) {
     debugMode,
     showOnPageLogToasts,
     defaultSnoozeMinutes,
-    defaultFallbackUrl,
-    connection: sanitizeConnectionSettings(src.connection)
+    defaultFallbackUrl
   };
   return out;
 }
@@ -2261,6 +2179,9 @@ function isTimedBlockingMode(mode) {
 }
 
 function getGroupTypeLabel(groupType) {
+  const profile = PLATFORM_PROFILES?.[normalizeGroupType(groupType)];
+  if (profile?.displayName) return profile.displayName;
+
   if (groupType === "youtube") {
     return t("groupType.youtube");
   }
@@ -2301,6 +2222,10 @@ function getGroupTypeLabel(groupType) {
 }
 
 function getEditorTypeSummary(groupType) {
+  if (isPlatformFeedGroupType(groupType) && normalizeGroupType(groupType) !== "twitter") {
+    return t("platform.rulesCopy", { platform: getPlatformDisplayName(groupType) });
+  }
+
   if (groupType === "youtube") {
     return t("editor.typeSummaryYouTube");
   }
@@ -2341,6 +2266,9 @@ function getEditorTypeSummary(groupType) {
 }
 
 function getPlatformDisplayName(groupType) {
+  const profile = PLATFORM_PROFILES?.[normalizeGroupType(groupType)];
+  if (profile?.displayName) return profile.displayName;
+
   if (groupType === "youtube") {
     return t("groupType.youtube");
   }
@@ -2429,7 +2357,9 @@ function getPlatformTypeLabel(groupType, type) {
 }
 
 function getPlatformAuthorsPlaceholder(groupType) {
-  return t(`platform.placeholder.${normalizeGroupType(groupType)}`);
+  const key = `platform.placeholder.${normalizeGroupType(groupType)}`;
+  const translated = t(key);
+  return translated === key ? "" : translated;
 }
 
 // Sets the unified "Platform rules" card header (title + one-line copy). Runs
@@ -2440,6 +2370,24 @@ function applyPlatformRulesHeader(groupType) {
   const platform = getPlatformDisplayName(type);
   if (platformVideoTitle) platformVideoTitle.textContent = t("platform.rulesTitle", { platform });
   if (platformVideoCopy) platformVideoCopy.textContent = t("platform.rulesCopy", { platform });
+}
+
+// A Platform rule has one platform at a time. Populate the selector from the
+// same registry that drives its capabilities so adding a platform never creates
+// a second editor or a stale hard-coded option list.
+function applyPlatformRuleSelection(groupType) {
+  if (!platformRulePlatformField) return;
+
+  const selectedType = normalizeGroupType(groupType);
+  platformRulePlatformField.innerHTML = "";
+  for (const type of PLATFORM_GROUP_TYPES) {
+    const option = document.createElement("option");
+    option.value = type;
+    option.textContent = getPlatformDisplayName(type);
+    option.selected = type === selectedType;
+    platformRulePlatformField.appendChild(option);
+  }
+  platformRulePlatformField.value = selectedType;
 }
 
 // Builds the author/account mode dropdown for the current platform.
@@ -2468,9 +2416,11 @@ function applyPlatformVideoUi(groupType) {
   const isYouTube = type === "youtube";
   const isTwitter = type === "twitter";
 
-  // Twitter/X has no video-form axis — hide the content-type selector and
-  // present account (handle) controls only.
-  platformVideoModeRow.classList.toggle("hidden", isTwitter);
+  const isFeedPlatform = isPlatformFeedGroupType(type);
+
+  // Feed platforms have no video-form axis. Twitter/X retains its account
+  // wording; the other feeds use the generic author wording.
+  platformVideoModeRow.classList.toggle("hidden", isFeedPlatform);
 
   platformVideoModeLabel.textContent = t("platform.videoMode");
   if (platformVideoModeHelp) platformVideoModeHelp.textContent = t("platform.videoModeHelp");
@@ -2491,14 +2441,14 @@ function applyPlatformVideoUi(groupType) {
     ? t("platform.help.youtube", { platform })
     : isTwitter
       ? t("platform.help.twitter", { platform })
+      : isFeedPlatform
+        ? t("platform.rulesCopy", { platform })
       : t("platform.help.generic", { platform, shortLabel, longLabel, postLabel });
 
 }
 
 function getProfileSurfaceHideEntries(groupType) {
-  const profile =
-    typeof PLATFORM_PROFILES !== "undefined" ? PLATFORM_PROFILES[normalizeGroupType(groupType)] : null;
-  return Array.isArray(profile?.surfaceHides) ? profile.surfaceHides : [];
+  return getSurfaceHideEntries(groupType);
 }
 
 function getDraftSurfaceHides(group, draft) {
@@ -2514,9 +2464,8 @@ function readSurfaceHidesFromForm() {
     .map((input) => input.value);
 }
 
-// Render the opt-in "Hide elements" checklist for the selected platform group.
-// Each entry maps to a registry surfaceHides id; toggling persists into the
-// group's draft (same auto-save path as the other platform fields).
+// Render the platform's verified content-control matrix. Each entry maps to a
+// registry surfaceHides id; toggling persists into the group's draft.
 function renderSurfaceHides(group, draft, editable) {
   if (!surfaceHidesSection || !surfaceHidesList) {
     return;
@@ -2531,6 +2480,8 @@ function renderSurfaceHides(group, draft, editable) {
   }
 
   surfaceHidesSection.classList.remove("hidden");
+  if (surfaceHidesTitle) surfaceHidesTitle.textContent = t("surfaceHide.contentTitle");
+  if (surfaceHidesHelp) surfaceHidesHelp.textContent = t("surfaceHide.contentHelp");
   const enabled = new Set(getDraftSurfaceHides(group, draft));
 
   for (const entry of entries) {
@@ -2693,6 +2644,15 @@ function describeTwitterScope(groupLike) {
     return t("meta.noAuthors");
   }
   return t("meta.allTwitter");
+}
+
+function describeFeedPlatformScope(groupLike) {
+  const authors = Array.isArray(groupLike.platformAuthors) ? groupLike.platformAuthors : [];
+  const mode = normalizePlatformAuthorMode(groupLike.platformAuthorMode);
+  if (mode === "include") return `${authors.length} ${t("meta.creators")}`;
+  if (mode === "exclude") return t("meta.allExceptCreators", { count: authors.length });
+  if (mode === "nobody") return t("meta.noAuthors");
+  return getPlatformDisplayName(groupLike.groupType);
 }
 
 function describeRedditScope(groupLike) {
@@ -3441,7 +3401,11 @@ function createDefaultGroup(groupType = DEFAULT_GROUP_TYPE) {
   const twitterCount = state.groups.filter((group) => group.groupType === "twitter").length + 1;
   const customCount = state.groups.filter((group) => group.groupType === "custom").length + 1;
   const siteCount = state.groups.filter((group) => group.groupType === "site").length + 1;
-  const normalizedGroupType = normalizeGroupType(groupType);
+  // The add menu offers one unified Platform rule. It starts with YouTube only
+  // as a safe first profile; the cyan Rule box owns the actual platform choice.
+  const normalizedGroupType = normalizeGroupType(
+    groupType === "platform" ? DEFAULT_PLATFORM_RULE_GROUP_TYPE : groupType
+  );
 
   return {
     id: createGroupId(),
@@ -3497,6 +3461,9 @@ function createDefaultGroup(groupType = DEFAULT_GROUP_TYPE) {
     parentalPasswordHash: null,
     parentalPasswordSalt: null,
     sites: [],
+    // false → `sites` is a blocklist; true → `sites` is an allowlist
+    // ("block everything except these"). Only site groups use this list.
+    allowlist: false,
     blockHomePage: false,
     effect: "block",
     fallbackUrl: state.globalSettings?.defaultFallbackUrl ?? "",
@@ -3560,6 +3527,7 @@ function sanitizeGroups(groups) {
     const rawAuthors = Array.isArray(group?.platformAuthors) ? group.platformAuthors : [];
     const rawRedditSubreddits = Array.isArray(group?.redditSubreddits) ? group.redditSubreddits : [];
     const rawDiscordTargets = Array.isArray(group?.discordTargets) ? group.discordTargets : [];
+    const ownsSiteList = normalizedGroupType === "site";
 
     return {
       ...baseGroup,
@@ -3642,9 +3610,10 @@ function sanitizeGroups(groups) {
         typeof group?.parentalPasswordSalt === "string" && group.parentalPasswordSalt
           ? group.parentalPasswordSalt
           : null,
-      sites: Array.isArray(group?.sites)
+      sites: ownsSiteList && Array.isArray(group?.sites)
         ? [...new Set(group.sites.map(normalizeSiteInput).filter(Boolean))]
         : [],
+      allowlist: ownsSiteList && Boolean(group?.allowlist),
       blockHomePage: Boolean(group?.blockHomePage),
       effect: group?.effect === "allow" ? "allow" : "block",
       fallbackUrl: typeof group?.fallbackUrl === "string" ? group.fallbackUrl.trim() : "",
@@ -3761,6 +3730,7 @@ function getSerializableGroupSnapshot(group) {
     parentalPasswordHash: group.parentalPasswordHash ?? null,
     parentalPasswordSalt: group.parentalPasswordSalt ?? null,
     sites: [...group.sites],
+    allowlist: Boolean(group.allowlist),
     blockHomePage: Boolean(group.blockHomePage),
     effect: group.effect === "allow" ? "allow" : "block",
     fallbackUrl: group.fallbackUrl ?? "",
@@ -3877,6 +3847,7 @@ function groupToDraft(group) {
     surfaceHides: normalizeSurfaceHides(group.surfaceHides, group.groupType),
     blockingRulesText: group.blockingRulesText,
     blockHomePage: Boolean(group.blockHomePage),
+    allowlist: Boolean(group.allowlist),
     effect: group.effect === "allow" ? "allow" : "block",
     fallbackUrl: group.fallbackUrl ?? "",
     skipToNextOnBlock: Boolean(group.skipToNextOnBlock),
@@ -4387,16 +4358,20 @@ function getGroupMetaText(group, draft, now = Date.now()) {
         discordTargets: draftTargets.length > 0 ? draftTargets : group.discordTargets
       })
     );
-  } else if (group.groupType === "twitter") {
-    const draftAccounts = parsePlatformAuthorsTextarea(
+  } else if (isPlatformFeedGroupType(group.groupType)) {
+    const draftAuthors = parsePlatformAuthorsTextarea(
       group.groupType,
       draft?.platformAuthorsText ?? ""
     ).validAuthors;
-    pieces.push(
-      describeTwitterScope({
+    const scopeGroup = {
+      groupType: group.groupType,
         platformAuthorMode: draft?.platformAuthorMode ?? group.platformAuthorMode,
-        platformAuthors: draftAccounts.length > 0 ? draftAccounts : group.platformAuthors
-      })
+        platformAuthors: draftAuthors.length > 0 ? draftAuthors : group.platformAuthors
+    };
+    pieces.push(
+      group.groupType === "twitter"
+        ? describeTwitterScope(scopeGroup)
+        : describeFeedPlatformScope(scopeGroup)
     );
   } else if (group.groupType === "custom") {
     pieces.push(t("meta.customRules"));
@@ -4770,6 +4745,8 @@ function renderEditor(now = Date.now()) {
     snoozeConfirmationsField.value = "";
     scheduleWindowsField.value = "";
     blockedSitesField.value = "";
+    if (siteAllowlistField) siteAllowlistField.checked = false;
+    if (siteSettingsLabel) siteSettingsLabel.textContent = t("sites.label");
     blockingRulesField.value = "";
     platformAuthorsField.value = "";
     platformVideoModeField.value = "all";
@@ -4794,6 +4771,7 @@ function renderEditor(now = Date.now()) {
     timedSettings.classList.add("hidden");
     customSettingsCard.classList.add("hidden");
     if (platformRulesCard) platformRulesCard.classList.add("hidden");
+    if (platformRulePlatformField) platformRulePlatformField.disabled = true;
     platformVideoCard.classList.add("hidden");
     redditSettingsCard.classList.add("hidden");
     discordSettingsCard.classList.add("hidden");
@@ -4865,9 +4843,7 @@ function renderEditor(now = Date.now()) {
   const selectedMode = normalizeBlockingMode(draft?.mode ?? group.mode);
   const isTimedMode = isTimedBlockingMode(selectedMode);
   const isPlatformVideoGroup = isPlatformVideoGroupType(group.groupType);
-  const isTwitterGroup = normalizeGroupType(group.groupType) === "twitter";
-  // Twitter/X reuses the account (author) controls, minus the video-form axis.
-  const usesAuthorAxis = isPlatformVideoGroup || isTwitterGroup;
+  const usesAuthorAxis = isPlatformAuthorGroupType(group.groupType);
   const isRedditGroup = group.groupType === "reddit";
   const isDiscordGroup = group.groupType === "discord";
   const isCustomGroup = group.groupType === "custom";
@@ -4887,6 +4863,7 @@ function renderEditor(now = Date.now()) {
 
   if (isPlatformProfileGroup) {
     applyPlatformRulesHeader(group.groupType);
+    applyPlatformRuleSelection(group.groupType);
   }
   if (usesAuthorAxis) {
     applyPlatformVideoUi(group.groupType);
@@ -4967,6 +4944,9 @@ function renderEditor(now = Date.now()) {
   if (platformRulesCard) {
     platformRulesCard.classList.toggle("hidden", !isPlatformProfileGroup);
   }
+  if (platformRulePlatformField) {
+    platformRulePlatformField.disabled = !editable || !isPlatformProfileGroup;
+  }
   platformVideoCard.classList.toggle("hidden", !usesAuthorAxis);
   redditSettingsCard.classList.toggle("hidden", !isRedditGroup);
   discordSettingsCard.classList.toggle("hidden", !isDiscordGroup);
@@ -4975,10 +4955,15 @@ function renderEditor(now = Date.now()) {
     fallbackUrlSection.classList.toggle("hidden", isCustomGroup);
   }
   scheduleSection.classList.toggle("hidden", isCustomGroup);
-  siteSettingsSection.classList.toggle(
-    "hidden",
-    isPlatformProfileGroup || isCustomGroup
-  );
+  // Website groups own the domain list and its allowlist toggle. Custom rules
+  // define their own behavior, so they never carry a hidden site boundary.
+  siteSettingsSection.classList.toggle("hidden", isPlatformProfileGroup || isCustomGroup);
+
+  const allowlistOn = Boolean(draft?.allowlist ?? group.allowlist);
+  if (siteAllowlistField) siteAllowlistField.checked = allowlistOn;
+  if (siteSettingsLabel) {
+    siteSettingsLabel.textContent = allowlistOn ? t("sites.allowlistedLabel") : t("sites.label");
+  }
 
   groupNameField.disabled = !editable;
   groupEnabledField.disabled = !editable;
@@ -4997,11 +4982,14 @@ function renderEditor(now = Date.now()) {
     group.groupType === "site" && bridgeOwnsApps() && Boolean(groupConnectionCluster(group));
   blockedSitesField.disabled =
     !editable || isPlatformProfileGroup || isCustomGroup || domainsMirrored;
+  if (siteAllowlistField) {
+    siteAllowlistField.disabled =
+      !editable || isPlatformProfileGroup || isCustomGroup || domainsMirrored;
+  }
   blockingRulesField.disabled = !editable || !isCustomGroup;
   const currentAuthorMode = normalizePlatformAuthorMode(platformAuthorModeField.value);
   const authorModeUsesList = platformAuthorModeUsesList(currentAuthorMode); // include/exclude
-  // Show the author list only for include/exclude; show it for neither
-  // "all" nor "no authors".
+  // Show the author list only for include/exclude.
   platformAuthorsBlock.classList.toggle("hidden", !usesAuthorAxis || !authorModeUsesList);
   platformAuthorsField.disabled = !editable || !usesAuthorAxis || !authorModeUsesList;
   platformVideoModeField.disabled = !editable || !isPlatformVideoGroup;
@@ -5015,7 +5003,6 @@ function renderEditor(now = Date.now()) {
     !editable || isPlatformProfileGroup || isCustomGroup || domainsMirrored;
   renderBlockedSites();
   refreshChipField(platformAuthorsField);
-  renderPlatformTagChips();
   refreshChipField(redditSubredditsField);
   refreshChipField(discordTargetsField);
   deleteGroupButton.disabled = !editable;
@@ -5168,8 +5155,7 @@ function stashCurrentDraft() {
   }
 
   const isPlatformVideoGroup = isPlatformVideoGroupType(group.groupType);
-  const isTwitterGroup = normalizeGroupType(group.groupType) === "twitter";
-  const usesAuthorAxis = isPlatformVideoGroup || isTwitterGroup;
+  const usesAuthorAxis = isPlatformAuthorGroupType(group.groupType);
   const isRedditGroup = group.groupType === "reddit";
   const isDiscordGroup = group.groupType === "discord";
 
@@ -5187,6 +5173,7 @@ function stashCurrentDraft() {
     activeDays: collectSelectedDays(),
     timeWindowsText: scheduleWindowsField.value,
     sitesText: blockedSitesField.value,
+    allowlist: siteAllowlistField.checked,
     blockingRulesText: blockingRulesField.value,
     platformVideoMode: platformVideoModeField.value,
     platformAuthorMode: platformAuthorModeField.value,
@@ -5381,6 +5368,78 @@ async function addGroup(groupType = DEFAULT_GROUP_TYPE) {
   render();
   groupNameField.focus();
   groupNameField.select();
+}
+
+function resetPlatformCriteriaFor(group, groupType) {
+  const defaults = createDefaultGroup(groupType);
+  return {
+    ...group,
+    groupType: defaults.groupType,
+    platformVideoMode: defaults.platformVideoMode,
+    platformAuthorMode: defaults.platformAuthorMode,
+    platformAuthors: defaults.platformAuthors,
+    redditMode: defaults.redditMode,
+    redditSubreddits: defaults.redditSubreddits,
+    discordMode: defaults.discordMode,
+    discordTargets: defaults.discordTargets,
+    surfaceHides: defaults.surfaceHides,
+    blockHomePage: defaults.blockHomePage,
+    skipToNextOnBlock: defaults.skipToNextOnBlock
+  };
+}
+
+async function changeSelectedPlatformRule(groupType) {
+  const requestedType = normalizeGroupType(groupType);
+  if (!isPlatformProfileGroupType(requestedType)) {
+    render();
+    return;
+  }
+
+  const currentGroup = getSelectedGroup();
+  if (
+    !currentGroup ||
+    !isPlatformProfileGroupType(currentGroup.groupType) ||
+    !isGroupEditable(currentGroup)
+  ) {
+    render();
+    return;
+  }
+  if (currentGroup.groupType === requestedType) return;
+
+  // Prevent a second change event from racing the confirmation and draft flush.
+  if (platformRulePlatformField) platformRulePlatformField.disabled = true;
+  const confirmed = await cbDialog.confirm(
+    t("platform.changeWarning", {
+      from: getPlatformDisplayName(currentGroup.groupType),
+      to: getPlatformDisplayName(requestedType)
+    }),
+    { danger: true, confirmText: t("modal.confirm"), cancelText: t("modal.cancel") }
+  );
+  if (!confirmed) {
+    render();
+    return;
+  }
+
+  stashCurrentDraft();
+  await flushAutosave();
+  const group = getSelectedGroup();
+  if (!group || !isPlatformProfileGroupType(group.groupType) || !isGroupEditable(group)) {
+    render();
+    return;
+  }
+  if (group.groupType === requestedType) {
+    render();
+    return;
+  }
+
+  // Every platform parses different identifiers and exposes different surface
+  // controls. Start those criteria fresh instead of retaining invisible rules
+  // that could accidentally become active on the newly selected platform.
+  const updatedGroup = resetPlatformCriteriaFor(group, requestedType);
+  state.groups = state.groups.map((item) => (item.id === group.id ? updatedGroup : item));
+  state.drafts[group.id] = groupToDraft(updatedGroup);
+  await persistState();
+  render();
 }
 
 async function deleteAllGroups() {
@@ -5619,12 +5678,14 @@ function buildUpdatedGroupFromDraft(group, draft, { strict = true } = {}) {
     fail(new Error(t("status.invalidTimeWindows", { list: timeWindows.invalidLines.join(", ") })));
   }
 
-  if (group.groupType === "site" && siteResults.invalidSites.length > 0) {
+  // Only website groups own a domain list.
+  const usesSiteList = group.groupType === "site";
+
+  if (usesSiteList && siteResults.invalidSites.length > 0) {
     fail(new Error(t("status.invalidSites", { list: siteResults.invalidSites.join(", ") })));
   }
 
-  const usesAuthorAxis =
-    isPlatformVideoGroupType(group.groupType) || normalizeGroupType(group.groupType) === "twitter";
+  const usesAuthorAxis = isPlatformAuthorGroupType(group.groupType);
 
   // Invalid platform entries are surfaced inline as red chips in the editor, so
   // we no longer abort the save — valid entries persist and the bad chips stay
@@ -5673,7 +5734,10 @@ function buildUpdatedGroupFromDraft(group, draft, { strict = true } = {}) {
         group.groupType === "discord" ? discordResults.validTargets : group.discordTargets,
       discordMode: group.groupType === "discord" ? discordMode : group.discordMode,
       blockingRulesText: isCustomGroup ? blockingRulesText : group.blockingRulesText,
-      sites: group.groupType === "site" ? siteResults.validSites : [],
+      sites: usesSiteList ? siteResults.validSites : [],
+      // Blocklist (false) vs "block all except" (true). Only website groups
+      // can carry an allowlist.
+      allowlist: usesSiteList ? Boolean(draft.allowlist) : false,
       blockHomePage: Boolean(draft.blockHomePage),
       // Only platform-profile groups expose the effect toggle; force "block"
       // for everything else so custom/default groups can't become exceptions.
@@ -6843,41 +6907,26 @@ async function requestCustomGroupSyntaxCheck(source) {
 function buildCustomRuleAiPrompt(userRequest, currentRule) {
   const demand = String(userRequest || "").trim() || "(No extra user request was provided.)";
   const existingRule = String(currentRule || "").trim() || "(No current rule.)";
+  const reference =
+    typeof globalThis.CUSTOM_RULE_AI_REFERENCE === "string" &&
+    globalThis.CUSTOM_RULE_AI_REFERENCE.trim()
+      ? globalThis.CUSTOM_RULE_AI_REFERENCE
+      : "CUSTOM_RULE_API_REFERENCE_UNAVAILABLE";
 
   return [
-    "TASK: generate custom-rule JavaScript for Chrome extension Adamancia Vault — Website Blocker & Focus Timer.",
-    "OUTPUT_CONTRACT: put only the final valid JavaScript source inside one copyable fenced code block labeled javascript; no prose before or after the code block.",
-    "TOP_LEVEL_SHAPE: (event, helpers) => { /* register handlers here */ }",
-    "EXECUTION_MODEL: top-level function runs once per Run click or enable; it must register persistent handlers. Do not do the blocking work only at top level. Handlers persist until Run again, disable, delete, or same (type,id) re-register. Custom rules ALWAYS run (no built-in schedule). Sandbox is long-lived and shared by groups. Keep synchronous work bounded. No infinite loops, network fetches, external packages, eval/new Function, DOM globals, chrome APIs, timers like setInterval for rule logic, or assumptions that browser/page globals exist.",
+    "TASK: Generate a Custom-rule source for Adamancia Vault.",
+    "OUTPUT_CONTRACT: Return exactly one fenced javascript code block containing the complete source. Do not include prose, pseudocode, placeholders, imports, or markdown outside that one code block.",
+    "QUALITY_CONTRACT: Implement the user's request with the current API reference below. Preserve useful behaviour from the current rule only when it does not conflict with the user's request. Never invent API methods.",
+    "CUSTOM_RULE_API_REFERENCE_BEGIN",
+    reference,
+    "CUSTOM_RULE_API_REFERENCE_END",
     "USER_REQUEST_BEGIN",
     demand,
     "USER_REQUEST_END",
-    "API.EVENT_REGISTRY:",
-    "event.on(type,id,handler,options?) -> boolean (register or replace by type+id); event.off(type,id) -> boolean; event.emit(type,data?,{scope?}) -> void. Raw aliases also exist: event.register/unregister/post, event.getEvent(type,id), event.getEvents(type), event.countRegistered(type), event.unregisterAll(type). Reserved types starting '_' are rejected. options.priority default 0 (higher runs first). options.intervalMs throttles frequent handlers. There are NO per-type convenience methods (no registerTickEvent/countTickRegistered etc.) — always pass the raw type string, e.g. event.on('tickEvent','my-id',(ev,h)=>{}).",
-    "BUILTIN_EVENT_TYPES: tickEvent, openWebEvent, closeWebEvent, webChangedEvent, timerEnded, snoozePress, panelEvent, localFileEvent, pageHeartbeatEvent. (There are no switch/refresh events: webChangedEvent + its flags cover same-tab URL changes, cross-domain hops, first load, and reloads.)",
-    "EVENT_SEMANTICS: tickEvent per-open-tab 1s tick data {intervalMs} with at most one tick per tab per second; pageHeartbeatEvent active visible tab heartbeat data {elapsedMs}; openWebEvent new tab created data {previousUrl,isNewTab}; closeWebEvent tab close (no post-URL; the tab is gone) data {reason,nextUrl}; webChangedEvent one committed top-level navigation/reload data {previousUrl,previousHostname,sameDomain,isFirstLoad,isReload,transition:'commit'} — derive same-tab URL change (!isFirstLoad && url!==previousUrl), cross-domain hop (!sameDomain), first load (isFirstLoad), and refresh (isReload) from these flags; timerEnded owning group only data {timerId,displayName,direction,currentMs}; snoozePress custom group only when Start Snooze clicked data {triggeredAt}; panelEvent owning group only data {panelId,controlId,eventName,value,values,key,code,keyInfo} and ev.panelId/ev.controlId/ev.eventName/ev.value/ev.values/ev.key/ev.code/ev.keyInfo shortcuts; localFileEvent owning group only data {eventName,action,path,directoryPath,requestId,ok,text,value,entries,exists,bytes,error} and same-name ev shortcuts. New tab/about blank exposed as ev.url === ''.",
-    "HANDLER_SHAPE: (ev, helpers) => void. ev fields: type, groupId, tabId, pageId, url, hostname, time:{now,month,dayOfMonth,dayName,hour,minute}, data. ev methods: preventDefault(), stopPropagation(), setResult(number|string), getResult(), post(type,data,{scope?}), setRedirectLink(url), getRedirectLink(). setResult(-1)=block, 0=neutral/pass, 1=allow override; string result is redirect URL; setRedirectLink sets redirect target for blocked result; stopPropagation halts all later handlers across groups. ev is Proxy: custom fields can be assigned/read during same dispatch.",
-    "HELPERS.TOP: helpers.now, helpers.currentUrl, helpers.groupId, helpers.platform(name?) (raw platform feed control — see HELPERS.PLATFORM), helpers.log(...), helpers.warn(...), helpers.error(...), helpers.logScreen(...), helpers.warnScreen(...), helpers.errorScreen(...), helpers.logPopup(...), helpers.warnPopup(...), helpers.errorPopup(...), getLogHelper, getDomainHelper, getDomainUtility, getTimerHelper, getPanelHelper, getPersistenceHelper, getRedirectionHelper, getDOMHelper, getNavigationHelper, getStorageHelper, getLocalFolderHelper, getTabHelper, getPlatformHelper.",
-    "HELPERS.LOG: log=helpers.getLogHelper(); log.log/warn/error write popup Log panel and follow Settings → Show custom rule logs on web pages for page toasts. log.logScreen/warnScreen/errorScreen write screen/page toast only. log.logPopup/warnPopup/errorPopup write popup only. Top-level helpers.log*, warn*, error* shortcuts mirror these. Logs are capped/rate-limited.",
-    "HELPERS.DOMAIN: d=helpers.getDomainHelper(); d.hostnameOf(url); d.pathnameOf(url); d.matches(hostname,site); d.getPlatform(url); d.isYouTubeHost(host); d.isTikTokHost(host); d.isInstagramHost(host); d.isFacebookHost(host); d.isTwitchHost(host); d.isRedditHost(host); d.isDiscordHost(host); d.isEmptyStartPage(url); d.matchesAny(url,regexOrArrayOrString); d.pathStartsWith(url,path); d.queryHas(url,key,value?); d.queryGet(url,key); d.isSearchPage(url); d.isInfiniteFeedUrl(url); d.sameSection(a,b). Platform URL classifiers: d.youtube()/tiktok()/instagram()/facebook()/twitch() each expose isPlatformUrl(url), isShortUrl(url), isVideoUrl(url), isPostUrl(url), isHomePage(url), extractAuthor(url), extractVideoId(url).",
-    "HELPERS.TIMER: tm=helpers.getTimerHelper(); tm.groupId; tm.create({id,displayName?,direction?,currentMs?,minMs?,maxMs?,stepMs?,overlayStyle?,scope?,domain?,accrueWhen?}) resets; tm.getOrCreateTimer({...same...}) creates only when missing and otherwise returns the existing timer unchanged (predicates not replaced); init fields apply only on creation. direction forward/backward; currentMs ms. OPTIONS: minMs/maxMs clamp currentMs (forward stops at maxMs, backward stops at minMs); stepMs quantizes each auto-tick (e.g. 60000 = whole-minute accrual); overlayStyle is a JSON style object for the on-page chip (known string keys color,background,fontSize,fontWeight,border,borderRadius,padding,opacity,icon). PREDICATES: scope(url) auto-ticks on the visible page heartbeat; domain(url) controls overlay display; accrueWhen(url) is an extra gate so the timer ticks only when BOTH scope and accrueWhen are true (e.g. only while a video plays). Mutators: setDirection(id,dir), setCurrentMs(id,ms), addMs(id,deltaMs), subMs(id,deltaMs), setBounds(id,minMs,maxMs), setStep(id,stepMs), setOverlayStyle(id,style), setDisplayName(id,name). Reads: getCurrentMs(id), isExpired(id), isPaused(id), getDirection(id), getDisplayName(id), exists(id), getState(id)->{id,displayName,direction,isPaused,currentMs,isExpired,minMs?,maxMs?,stepMs?,overlayStyle?}|null, list()->array. tm.delete(id), pause(id), resume(id). Timers do not block by themselves; check isExpired in an open/switch/webChanged handler and then redirect.",
-    "HELPERS.PANEL: pn=helpers.getPanelHelper(); pn.create({id,title?,description?,position?,align?,layout?,priority?,width?,textSize?,theme?,ariaLabel?,role?,autoFocus?,scope?,domain?,controls?,onEvent?,onChange?,onClick?,onInput?,onFocus?,onBlur?,onSubmit?,onClose?,onMount?,onUnmount?,onKey?}) replaces/resets; pn.getOrCreatePanel(config) creates only when missing and otherwise returns existing panel unchanged; pn.update(id,patch), delete(id), show(id), hide(id), setValue(panelId,controlId,value), updateControl(panelId,controlId,patch), enable/disable(panelId,controlId), setOptions(panelId,controlId,options), setText(panelId,controlId,text), setTheme(panelId,theme), setTitle(panelId,title), setDescription(panelId,text), getValue(panelId,controlId), getValues(panelId), getState(id), list(); builders: notice(config), confirm(config), checklist(config), form(config). Controls: {id,type,label?,text?,placeholder?,value?,options?,min?,max?,step?,timerId?,timer?,format?,showExpired?,action?,layout?,priority?,width?,height?,rows?,disabled?,ariaLabel?,autoFocus?,onEvent?,onChange?,onClick?,onInput?,onFocus?,onBlur?,onSubmit?,onClose?,onMount?,onUnmount?,onKey?}; types text, checkbox, select, textInput, textarea, button, section, timer, numberInput, range, toggle, radio, date, time, color, pin, html. html mounts raw markup via control.html (sanitized: <script> and on* handlers stripped, javascript: URLs neutralized) — use it for custom layouts/icons. Read/write any control with getValue/getValues/setValue/updateControl. section has nested controls and its own layout/priority. timer is display-only: use timerId to hydrate from getTimerHelper state, or timer: tm.getState(id) for a snapshot. numberInput/range support min/max/step; radio uses options; toggle is boolean. Layout presets: vertical, compact, comfortable, spacious, inline, row, wrap, twoColumn, grid, split, form, toolbar, stack. Higher priority panels/controls/sections appear earlier/closer to corner. Per-control width accepts px/%, full, auto; height accepts px/auto; rows affects textarea. If panel width is omitted, the outer panel auto-fits content tightly. Panel events include change/click/input/focus/blur/submit/close/mount/unmount/key; key events expose ev.key/ev.code/ev.keyInfo. scope/domain decide where shown.",
-    "HELPERS.PERSISTENCE: p=helpers.getPersistenceHelper(); p.get(key,defaultValue?), set(key,valueJSON), delete(key), has(key), keys(), entries(), clear(), size(). Values JSON-serializable; scoped to group.",
-    "HELPERS.REDIRECT: r=helpers.getRedirectionHelper(); r.get(); r.set(url); r.setRedirectLink(url); r.getRedirectLink(); r.createMessageUrl(message). ev.setRedirectLink can also be used directly.",
-    "HELPERS.DOM: dom=helpers.getDOMHelper(); dom.hide(selector), show(selector), addClass(selector,className), removeClass(selector,className), setText(selector,text), click(selector), injectCss(css,id?), removeInjectedCss(id), scrollTo(selector). These enqueue content-script DOM intents, applied after handler returns.",
-    "HELPERS.NAVIGATION: nav=helpers.getNavigationHelper(); nav.back(), forward(), reload(), goTo(url), closeTab(). These enqueue tab navigation intents for current event tab.",
-    "HELPERS.STORAGE: s=helpers.getStorageHelper(); includes persistence methods plus s.requestAsyncGet(key), s.requestAsyncSet(key,valueJSON). Async results arrive via follow-up custom storage events; do not await.",
-    "HELPERS.LOCAL_FOLDER: lf=helpers.getLocalFolderHelper(); requires Settings → Local File Folder. Supported files: .txt, .csv, .json inside the granted folder only. Request methods are async and return requestId: requestRead(path), requestWrite(path,text), requestAppend(path,text), requestList(directoryPath?), requestExists(path), requestReadJson(path), requestWriteJson(path,valueJSON). Results arrive via event.on('localFileEvent',id,(ev,h)=>{}) with ev.eventName read/write/append/list/exists/error, ev.path, ev.directoryPath, ev.requestId, ev.text, ev.value, ev.entries, ev.exists, ev.error.",
-    "HELPERS.TAB: tab=helpers.getTabHelper(); tab.list(), getActiveTab(), getById(id), countOpen(), requestRefresh(). Uses snapshot bundled with dispatch.",
-    "HELPERS.PLATFORM (RAW): p=helpers.platform('youtube') OR helpers.platform().youtube(). Platforms: youtube, tiktok, instagram, facebook, twitch. Raw methods on each: p.hide(slot,predicate,opts?) installs a per-(group,platform,slot) hide predicate; p.hide(predicate,opts?) (no slot) applies to every feed slot; p.allow(slot,predicate,opts?) / p.allow(predicate,opts?) installs a RESCUE predicate (effect 'allow') that overrides lower-priority block groups in the shared cascade; p.show(slot?) clears one slot's predicate (or all when slot omitted); p.surface(name,'hide'|'show') toggles a whole region; p.timer(slot,opts) caps subsection time and returns its id; p.snapshot() returns the raw per-platform snapshot or null; introspection p.slots()/p.surfaces()/p.timerSlots(); URL classifiers p.isPlatformUrl/isShortUrl/isVideoUrl/isPostUrl/isHomePage/extractAuthor/extractVideoId. opts: {blockPageOnVisit?} (redirect the page when a block predicate matches). Calling hide/show/timer with a slot the platform doesn't support throws TypeError. One predicate per (group,platform,slot); each call replaces it.",
-    "PLATFORM_SLOTS: youtube slots=shorts,videos,posts,comments,live surfaces=home,comments,shortButton,live timerSlots=shorts,videos,posts. tiktok slots=videos,comments,live surfaces=home,comments,live timerSlots=videos. instagram slots=shorts(Reels),posts,comments surfaces=home,comments timerSlots=shorts,posts. facebook slots=shorts(Reels),videos,posts,comments,live surfaces=home,comments,live timerSlots=shorts,videos,posts. twitch slots=shorts(Clips),streams,videos,live surfaces=home,comments,live timerSlots=shorts,streams,videos.",
-    "PLATFORM_PREDICATE_ITEM: the predicate receives a raw feed-card item={url,name,title,author,channelId,length,views,publishedAt,description,live,sponsored,algorithmic,videoForm}; most fields may be null/false. videoForm is one of short/long/post. Predicates run async in the sandbox over batches of cards; keep them pure and fast. Example: helpers.platform('youtube').hide('videos', it => it.author === 'example-channel').",
-    "COMMON_PATTERNS: hide feed cards by author or title -> helpers.platform(site).hide(slot,predicate) (re-installs on each Run; persists across navigations). Rescue/whitelist -> helpers.platform(site).allow(slot,predicate). Whole-page block -> in event.on('webChangedEvent'[,'openWebEvent']) handler, if the URL matches, call ev.setRedirectLink(url?) then ev.setResult(-1) (network-level blocking no longer exists; blocking is redirect-based). Time budgets -> getOrCreateTimer with scope/domain plus a handler that checks isExpired and redirects. Hide whole regions -> helpers.platform(site).surface('home','hide').",
     "CURRENT_RULE_BEGIN",
-    "BEGIN_CURRENT_RULE",
     existingRule,
-    "END_CURRENT_RULE",
-    "CURRENT_RULE_END"
+    "CURRENT_RULE_END",
+    "Return the final JavaScript source now."
   ].join("\n");
 }
 
@@ -6936,9 +6985,7 @@ async function runSelectedCustomGroup() {
     ]);
     if (response && response.__timedOut) {
       if (runCustomGroupStatus) {
-        runCustomGroupStatus.textContent =
-          "Halted: the rule took too long to load and was force-aborted. " +
-          "Check the Log panel for details.";
+        runCustomGroupStatus.textContent = t("custom.runStatusHalted");
         runCustomGroupStatus.className = "run-status error";
       }
       setStatus(t("status.customRunHaltedTimeBudget"), true);
@@ -7176,8 +7223,6 @@ if (templateGrid) {
 }
 
 setupPlatformChipInputs();
-setupYtTagUi();
-loadAllTags(false).catch(() => {});
 
 platformAuthorsField.addEventListener("input", () => {
   stashCurrentDraft();
@@ -7190,6 +7235,16 @@ platformVideoModeField.addEventListener("change", () => {
   renderGroupList();
   scheduleAutosave();
 });
+
+if (platformRulePlatformField) {
+  platformRulePlatformField.addEventListener("change", () => {
+    changeSelectedPlatformRule(platformRulePlatformField.value).catch((error) => {
+      console.error("Failed to change the platform rule.", error);
+      setStatus(t("status.errorSaveGroup"), true);
+      render();
+    });
+  });
+}
 
 platformAuthorModeField.addEventListener("change", () => {
   if (platformAuthorModeField.value === "exclude") {
@@ -7244,6 +7299,16 @@ for (const field of [platformBlockHomePageField, redditBlockHomePageField, disco
 if (groupEffectField) {
   groupEffectField.addEventListener("change", () => {
     stashCurrentDraft();
+    render();
+    renderGroupList();
+    scheduleAutosave();
+  });
+}
+
+if (siteAllowlistField) {
+  siteAllowlistField.addEventListener("change", () => {
+    stashCurrentDraft();
+    // re-render so the "Blocked websites" / "Allowed websites" label flips.
     render();
     renderGroupList();
     scheduleAutosave();
@@ -7331,44 +7396,9 @@ if (settingsModal) {
   }
 }
 
-if (connectionServerToggle) {
-  connectionServerToggle.addEventListener("change", () => {
-    const enabled = connectionServerToggle.checked;
-    updateConnectionSettings({ serverEnabled: enabled })
-      .then(() => {
-        try {
-          chrome.runtime.sendMessage({
-            type: enabled ? "connection-server-start" : "connection-server-stop"
-          });
-        } catch (_) {}
-      })
-      .catch(() => {});
-  });
-}
-
-if (connectionConnectButton) {
-  connectionConnectButton.addEventListener("click", () => {
-    updateConnectionSettings({ clientEnabled: true })
-      .then(() => {
-        try {
-          chrome.runtime.sendMessage({ type: "connection-connect" });
-        } catch (_) {}
-        applyConnectionStatus({ ...state.connectionStatus, state: "connecting" });
-      })
-      .catch(() => {});
-  });
-}
-
-if (connectionDisconnectButton) {
-  connectionDisconnectButton.addEventListener("click", () => {
-    updateConnectionSettings({ clientEnabled: false })
-      .then(() => {
-        try {
-          chrome.runtime.sendMessage({ type: "connection-disconnect" });
-        } catch (_) {}
-        applyConnectionStatus({ state: "off" });
-      })
-      .catch(() => {});
+if (classifierCollectionToggle) {
+  classifierCollectionToggle.addEventListener("change", () => {
+    classifierBridgeStorageSet({ ...classifierBridgeSettings, collectionEnabled: classifierCollectionToggle.checked }).catch(() => {});
   });
 }
 
@@ -7847,6 +7877,10 @@ async function initializePopupApp() {
   applyPanelWidth(loadPanelWidth());
 
   await loadGroups();
+  await chrome.storage.local.set({
+    [BLOCKED_GROUPS_KEY]: state.groups,
+    [GLOBAL_SETTINGS_KEY]: state.globalSettings
+  });
   await loadLogFeedSnapshot();
   // Banner runs after translations are applied so the labels read in
   // the user's language, and runs after loadGroups so the popup is in a
