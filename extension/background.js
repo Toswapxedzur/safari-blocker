@@ -329,6 +329,64 @@ function parseTimeWindowsText(value) {
   return [...new Set(lines)];
 }
 
+// ── Content-tag filter (platform rules) normalizers ──────────────────────
+// A platform group can block by content tag (from the Vault classifier), like
+// the author filter but keyed on WHAT the content is. Modes: "all" (off),
+// "include" (block listed tags), "exclude" (block all except listed tags).
+function normalizeTagFilterMode(value) {
+  return value === "include" || value === "exclude" ? value : "all";
+}
+function clampTagConfidence(value, fallback) {
+  const c = Number(value);
+  return Number.isFinite(c) ? Math.min(5, Math.max(1, Math.round(c))) : fallback;
+}
+// Each entry is { name, confidence?, also?, except? }:
+//   confidence — overrides the filter default for this entry;
+//   also       — further tags that must ALL be present too (AND: "A + B");
+//   except     — a carve-out ("!A"): the list matches only if no carve-out does.
+function normalizeTagList(raw) {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  const out = [];
+  const cleanName = (value) => (typeof value === "string" ? value.trim().slice(0, 100) : "");
+  for (const entry of raw) {
+    let name = null;
+    let confidence;
+    let also = [];
+    let except = false;
+    if (typeof entry === "string") {
+      name = entry;
+    } else if (entry && typeof entry === "object") {
+      name = entry.name;
+      confidence = entry.confidence;
+      if (Array.isArray(entry.also)) also = entry.also;
+      except = entry.except === true;
+    }
+    name = cleanName(name);
+    if (!name) continue;
+    const alsoSeen = new Set([name.toLowerCase()]);
+    const cleanAlso = [];
+    for (const extra of also) {
+      const extraName = cleanName(extra);
+      if (!extraName || alsoSeen.has(extraName.toLowerCase())) continue;
+      alsoSeen.add(extraName.toLowerCase());
+      cleanAlso.push(extraName);
+      if (cleanAlso.length >= 5) break;
+    }
+    const key = (except ? "!" : "") + [...alsoSeen].sort().join("+");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const c = Number(confidence);
+    const normalized = { name };
+    if (Number.isFinite(c) && c >= 1 && c <= 5) normalized.confidence = Math.round(c);
+    if (cleanAlso.length) normalized.also = cleanAlso;
+    if (except) normalized.except = true;
+    out.push(normalized);
+    if (out.length >= 100) break;
+  }
+  return out;
+}
+
 function sanitizeGroups(groups) {
   if (!Array.isArray(groups)) return [];
 
@@ -388,6 +446,16 @@ function sanitizeGroups(groups) {
               .filter(Boolean)
           )
         ],
+        // Content-tag filter (platform rules): block by classifier tag.
+        platformTagMode: normalizeTagFilterMode(group?.platformTagMode),
+        platformTags: normalizeTagList(group?.platformTags),
+        platformTagDefaultConfidence: clampTagConfidence(group?.platformTagDefaultConfidence, 4),
+        platformTagBlockUntagged: Boolean(group?.platformTagBlockUntagged),
+        platformTagEffect: group?.platformTagEffect === "block" ? "block" : "dim",
+        // A matching video's OWN page (watch/detail) blacks out its player in
+        // place. On unless explicitly turned off: feed-dim + page-block is the
+        // product default for content-tag blocking.
+        platformTagBlockPage: group?.platformTagBlockPage !== false,
         redditSubreddits: [
           ...new Set(rawRedditSubreddits.map(normalizeRedditSubredditInput).filter(Boolean))
         ],
@@ -1037,6 +1105,34 @@ function isPlatformBlockEnforcing(group, usageTimersMs) {
   return (usageTimersMs[group.id] ?? 0) >= getAllowedMs(group);
 }
 
+// Emit a group's content-tag filter as a SEPARATE feed-filter entry (own id +
+// effect), independent of the author/subreddit axis. Works for any platform
+// whose feed cards carry classifier tags (youtube, feed platforms like
+// bilibili, and reddit). content.js matchesFeedFilter does the tag matching.
+function pushTagFilterEntry(filters, group, enforce) {
+  const tagMode = normalizeTagFilterMode(group.platformTagMode);
+  if (tagMode !== "include" && tagMode !== "exclude") return;
+  const tagList = normalizeTagList(group.platformTags);
+  // A block-list with nothing to block is inert — unless it blocks untagged content.
+  const hasBlockingEntry = tagList.some((entry) => !entry.except);
+  if (tagMode === "include" && !hasBlockingEntry && !group.platformTagBlockUntagged) return;
+  filters.push({
+    id: group.id + "␟tag",
+    baseGroupId: group.id,
+    site: group.groupType,
+    tagFilter: {
+      mode: tagMode,
+      tags: tagList,
+      defaultConfidence: clampTagConfidence(group.platformTagDefaultConfidence, 4),
+      blockUntagged: Boolean(group.platformTagBlockUntagged)
+    },
+    effectVerdict: group.platformTagEffect === "block" ? "hide" : "dim",
+    // content.js evaluates the page's own entry against this same filter.
+    pageEffect: group.platformTagBlockPage !== false ? "block" : "allow",
+    enforce
+  });
+}
+
 function buildPlatformFeedFilters(pageContext, groups, usageTimersMs, groupSnoozes, now) {
   const filters = [];
   const currentSite = pageContext.videoSite || getPlatformGroupTypeForHost(pageContext.hostname);
@@ -1053,23 +1149,24 @@ function buildPlatformFeedFilters(pageContext, groups, usageTimersMs, groupSnooz
       ) {
         continue;
       }
-      const authorMode = normalizePlatformAuthorMode(group.platformAuthorMode);
-      if (authorMode !== "all" && authorMode !== "include" && authorMode !== "exclude") {
-        continue;
-      }
-      // Always emit the filter so content.js can measure exposure (for the
-      // usage timer) even while the group isn't blocking yet. `enforce` decides
-      // whether matched cards are actually hidden: instant always, after-minutes
-      // only past its allowance, and the count-up "timer" mode never.
+      // `enforce` decides whether matched cards are actually hidden: instant
+      // always, after-minutes only past its allowance, count-up "timer" never.
       const enforce = isPlatformBlockEnforcing(group, usageTimersMs);
-      filters.push({
-        id: group.id,
-        site: group.groupType,
-        videoMode: normalizeVideoMode(group.platformVideoMode),
-        authorMode,
-        authors: [...group.platformAuthors],
-        enforce
-      });
+      // Author filter: emitted only for its active modes. "nobody"/other → the
+      // author axis blocks nothing, but the group's TAG filter may still apply.
+      const authorMode = normalizePlatformAuthorMode(group.platformAuthorMode);
+      if (authorMode === "all" || authorMode === "include" || authorMode === "exclude") {
+        filters.push({
+          id: group.id,
+          site: group.groupType,
+          videoMode: normalizeVideoMode(group.platformVideoMode),
+          authorMode,
+          authors: [...group.platformAuthors],
+          enforce
+        });
+      }
+      // Content-tag filter: independent of the author mode. Applies regardless.
+      pushTagFilterEntry(filters, group, enforce);
     }
   }
 
@@ -1083,18 +1180,24 @@ function buildPlatformFeedFilters(pageContext, groups, usageTimersMs, groupSnooz
       ) {
         continue;
       }
+      const enforce = isPlatformBlockEnforcing(group, usageTimersMs);
       const subreddits = Array.isArray(group.redditSubreddits) ? group.redditSubreddits : [];
       const redditMode = normalizeRedditMode(group.redditMode, subreddits);
-      if (redditMode === "all") continue;
-      if (redditMode === "include" && subreddits.length === 0) continue;
-      const enforce = isPlatformBlockEnforcing(group, usageTimersMs);
-      filters.push({
-        id: group.id,
-        site: "reddit",
-        redditMode,
-        subreddits: [...subreddits],
-        enforce
-      });
+      // Subreddit filter (skips "all" / empty include); the tag filter below is
+      // independent and applies regardless of the subreddit mode.
+      if (
+        (redditMode === "include" || redditMode === "exclude") &&
+        !(redditMode === "include" && subreddits.length === 0)
+      ) {
+        filters.push({
+          id: group.id,
+          site: "reddit",
+          redditMode,
+          subreddits: [...subreddits],
+          enforce
+        });
+      }
+      pushTagFilterEntry(filters, group, enforce);
     }
   }
 
@@ -1108,18 +1211,21 @@ function buildPlatformFeedFilters(pageContext, groups, usageTimersMs, groupSnooz
       ) {
         continue;
       }
+      const enforce = isPlatformBlockEnforcing(group, usageTimersMs);
       const authorMode = normalizePlatformAuthorMode(group.platformAuthorMode);
       // Mode "all" blocks the whole page (handled by the matcher); "nobody"
-      // blocks nothing. Only include/exclude trim individual feed cards.
-      if (authorMode !== "include" && authorMode !== "exclude") continue;
-      const enforce = isPlatformBlockEnforcing(group, usageTimersMs);
-      filters.push({
-        id: group.id,
-        site: currentSite,
-        authorMode,
-        authors: [...group.platformAuthors],
-        enforce
-      });
+      // blocks nothing. Only include/exclude trim individual feed cards. The tag
+      // filter below is independent and applies regardless of the author mode.
+      if (authorMode === "include" || authorMode === "exclude") {
+        filters.push({
+          id: group.id,
+          site: currentSite,
+          authorMode,
+          authors: [...group.platformAuthors],
+          enforce
+        });
+      }
+      pushTagFilterEntry(filters, group, enforce);
     }
   }
 
