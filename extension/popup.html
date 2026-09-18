@@ -284,6 +284,63 @@
               </div>
             </div>
 
+            <details id="contentTagBuilder" class="content-tag-builder" open>
+              <summary data-i18n="contentTag.title">Block a content tag (no code)</summary>
+              <p class="field-help" data-i18n="contentTag.help">
+                Pick a platform and a content tag from the Vault classifier. Matching videos are blocked without writing any code.
+              </p>
+              <div class="content-tag-row">
+                <label class="label" for="contentTagPlatform" data-i18n="contentTag.platform">Platform</label>
+                <select id="contentTagPlatform">
+                  <option value="youtube" data-i18n="groupType.youtube">YouTube</option>
+                  <option value="tiktok" data-i18n="groupType.tiktok">TikTok</option>
+                  <option value="instagram" data-i18n="groupType.instagram">Instagram</option>
+                  <option value="facebook" data-i18n="groupType.facebook">Facebook</option>
+                  <option value="twitch" data-i18n="groupType.twitch">Twitch</option>
+                </select>
+                <p class="field-help" data-i18n="contentTag.platformHint">Reddit and Bilibili: use the Content tag filter on a Reddit or Bilibili rule group instead — custom rules cannot read those feeds yet.</p>
+              </div>
+              <div class="content-tag-row">
+                <label class="label" for="contentTagMode" data-i18n="contentTag.mode">Rule</label>
+                <select id="contentTagMode">
+                  <option value="include" data-i18n="contentTag.modeInclude">Block certain tags</option>
+                  <option value="exclude" data-i18n="contentTag.modeExclude">Block all except certain tags</option>
+                </select>
+              </div>
+              <div class="content-tag-row">
+                <label class="label" for="contentTagNames" data-i18n="contentTag.tags">Content tags</label>
+                <textarea id="contentTagNames" rows="4" autocomplete="off" spellcheck="false"
+                  placeholder="Gaming&#10;Drama @3" data-i18n-placeholder="contentTag.tagsPlaceholder"></textarea>
+                <div id="contentTagSuggestions" class="tag-suggestions hidden"></div>
+              </div>
+              <div class="content-tag-row">
+                <label class="label" for="contentTagConfidence" data-i18n="contentTag.confidence">Default minimum confidence</label>
+                <select id="contentTagConfidence">
+                  <option value="3">≥ 3</option>
+                  <option value="4" selected>≥ 4</option>
+                  <option value="5" data-i18n="contentTag.confidence5">≥ 5 (only very confident)</option>
+                </select>
+              </div>
+              <div class="content-tag-row">
+                <label class="label" for="contentTagEffect" data-i18n="contentTag.effect">When it matches</label>
+                <select id="contentTagEffect">
+                  <option value="dim" data-i18n="contentTag.effectDim">Black out the thumbnail (correctable)</option>
+                  <option value="block" data-i18n="contentTag.effectHide">Hide the video entirely</option>
+                </select>
+              </div>
+              <label id="contentTagBlockUntaggedRow" class="checkbox-row compact hidden" for="contentTagBlockUntagged">
+                <input id="contentTagBlockUntagged" type="checkbox" />
+                <span data-i18n="contentTag.blockUntagged">Also block videos with no confident tag</span>
+              </label>
+              <div class="field-actions">
+                <button id="contentTagApplyButton" type="button" class="weird" data-i18n="contentTag.apply">Block these tags</button>
+                <span id="contentTagStatus" class="run-status"></span>
+              </div>
+              <p class="field-help" data-i18n="contentTag.advancedNote">
+                Applying generates a rule below, which advanced users can fine-tune.
+              </p>
+            </details>
+
             <div id="blockingRulesEditor" class="code-editor">
               <pre id="blockingRulesHighlight" class="code-editor-highlight" aria-hidden="true"></pre>
               <textarea
@@ -386,6 +443,8 @@
                 <p id="platformVideoHelp" class="field-help"></p>
               </div>
 
+              <!-- Content-tag filter: block by what the Vault classifier tagged
+                   the content. Shown only for tag-compatible platforms. -->
               <label class="checkbox-row compact" for="platformBlockHomePage">
                 <input id="platformBlockHomePage" type="checkbox" />
                 <span data-i18n="filter.blockHomePage">Block home/feed pages</span>
@@ -399,6 +458,55 @@
                 <p class="field-help" data-i18n="filter.skipToNextOnBlockHelp">
                   For scroll-based feeds (Shorts, TikTok, Reels), skip to the next video instead of redirecting when blocked.
                 </p>
+              </div>
+            </div>
+
+            <!-- Content-tag filter: shown for any platform whose feed cards
+                 carry classifier tags (youtube, bilibili, reddit, …). Sibling
+                 of the per-platform field groups so it shows for all of them. -->
+            <div id="platformTagFields" class="platform-tag-fields hidden">
+              <label class="label" for="platformTagMode" data-i18n="tagFilter.mode">Content tag filter</label>
+              <select id="platformTagMode">
+                <option value="all" data-i18n="tagFilter.modeAll">Apply to all content</option>
+                <option value="include" data-i18n="tagFilter.modeInclude">Block certain tags</option>
+                <option value="exclude" data-i18n="tagFilter.modeExclude">Block all except certain tags</option>
+              </select>
+              <p class="field-help" data-i18n="tagFilter.help">
+                Block videos by what the Vault classifier tagged them. One rule per line: "Gaming" · "Gaming @3" sets its own minimum confidence · "Gaming + Drama" needs both · "!Tutorial" is an exception.
+              </p>
+              <div id="platformTagListBlock">
+                <label class="label" for="platformTags" data-i18n="tagFilter.tags">Tags</label>
+                <textarea
+                  id="platformTags"
+                  rows="4"
+                  placeholder="Gaming&#10;Drama @3"
+                  data-i18n-placeholder="tagFilter.tagsPlaceholder"
+                  spellcheck="false"
+                ></textarea>
+                <div id="platformTagSuggestions" class="tag-suggestions hidden"></div>
+                <div class="content-tag-row">
+                  <label class="label" for="platformTagDefaultConfidence" data-i18n="tagFilter.defaultConfidence">Default minimum confidence</label>
+                  <select id="platformTagDefaultConfidence">
+                    <option value="3">&#8805; 3</option>
+                    <option value="4" selected>&#8805; 4</option>
+                    <option value="5">&#8805; 5</option>
+                  </select>
+                </div>
+                <div class="content-tag-row">
+                  <label class="label" for="platformTagEffect" data-i18n="tagFilter.effect">When it matches</label>
+                  <select id="platformTagEffect">
+                    <option value="dim" data-i18n="tagFilter.effectDim">Black out the thumbnail (correctable)</option>
+                    <option value="block" data-i18n="tagFilter.effectHide">Hide the video entirely</option>
+                  </select>
+                </div>
+                <label class="checkbox-row compact" for="platformTagBlockPage">
+                  <input id="platformTagBlockPage" type="checkbox" checked />
+                  <span data-i18n="tagFilter.blockPage">Also black out a matching video's own page</span>
+                </label>
+                <label id="platformTagBlockUntaggedRow" class="checkbox-row compact" for="platformTagBlockUntagged">
+                  <input id="platformTagBlockUntagged" type="checkbox" />
+                  <span data-i18n="tagFilter.blockUntagged">Also block content with no confident tag</span>
+                </label>
               </div>
             </div>
 

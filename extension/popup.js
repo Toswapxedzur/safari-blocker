@@ -308,6 +308,16 @@ const platformAuthorsBlock = document.getElementById("platformAuthorsBlock");
 const platformAuthorsLabel = document.getElementById("platformAuthorsLabel");
 const platformAuthorsField = document.getElementById("platformAuthors");
 const platformVideoHelp = document.getElementById("platformVideoHelp");
+// Content-tag filter (platform rules).
+const platformTagFields = document.getElementById("platformTagFields");
+const platformTagModeField = document.getElementById("platformTagMode");
+const platformTagListBlock = document.getElementById("platformTagListBlock");
+const platformTagsField = document.getElementById("platformTags");
+const platformTagDefaultConfidenceField = document.getElementById("platformTagDefaultConfidence");
+const platformTagEffectField = document.getElementById("platformTagEffect");
+const platformTagBlockUntaggedRow = document.getElementById("platformTagBlockUntaggedRow");
+const platformTagBlockUntaggedField = document.getElementById("platformTagBlockUntagged");
+const platformTagBlockPageField = document.getElementById("platformTagBlockPage");
 const platformBlockHomePageField = document.getElementById("platformBlockHomePage");
 const skipToNextOnBlockRow = document.getElementById("skipToNextOnBlockRow");
 const skipToNextOnBlockField = document.getElementById("skipToNextOnBlock");
@@ -360,6 +370,17 @@ const clearSitesButton = document.getElementById("clearSitesButton");
 const runCustomGroupButton = document.getElementById("runCustomGroupButton");
 const checkSyntaxButton = document.getElementById("checkSyntaxButton");
 const runCustomGroupStatus = document.getElementById("runCustomGroupStatus");
+// No-code content-tag rule builder (inside the custom editor).
+const contentTagBuilder = document.getElementById("contentTagBuilder");
+const contentTagPlatformField = document.getElementById("contentTagPlatform");
+const contentTagModeField = document.getElementById("contentTagMode");
+const contentTagNamesField = document.getElementById("contentTagNames");
+const contentTagConfidenceField = document.getElementById("contentTagConfidence");
+const contentTagEffectField = document.getElementById("contentTagEffect");
+const contentTagBlockUntaggedRow = document.getElementById("contentTagBlockUntaggedRow");
+const contentTagBlockUntaggedField = document.getElementById("contentTagBlockUntagged");
+const contentTagApplyButton = document.getElementById("contentTagApplyButton");
+const contentTagStatus = document.getElementById("contentTagStatus");
 const aiPromptPanel = document.getElementById("aiPromptPanel");
 const aiPromptInput = document.getElementById("aiPromptInput");
 const aiPromptCopyButton = document.getElementById("aiPromptCopyButton");
@@ -1974,6 +1995,82 @@ function setupPlatformChipInputs() {
   });
 }
 
+// ── Content-tag filter helpers (platform rules) ──────────────────────────
+// Platforms whose feed-predicate/card pipeline can act on content tags. Others
+// (reddit, bilibili) need that engine extended before a tag filter can work, so
+// the Tag filter control is hidden for them.
+const TAG_FILTER_PLATFORMS = new Set(["youtube", "tiktok", "instagram", "facebook", "twitch", "reddit", "bilibili"]);
+function isTagFilterCompatible(groupType) {
+  return TAG_FILTER_PLATFORMS.has(String(groupType || ""));
+}
+function normalizeTagFilterModeChoice(value) {
+  return value === "include" || value === "exclude" ? value : "all";
+}
+function clampTagFilterConfidence(value, fallback) {
+  const c = Number(value);
+  return Number.isFinite(c) ? Math.min(5, Math.max(1, Math.round(c))) : fallback;
+}
+// One rule per line:
+//   Gaming            a tag
+//   Gaming @3         …with its own minimum confidence ("@N", ">=N", ">N", ":N")
+//   Gaming + Drama    AND — every tag on the line must be present (" + ", spaced;
+//                     "&" is left alone because real tag names contain it)
+//   !Tutorial         a carve-out — the list matches only if no "!" line does
+function parseTagListTextarea(value) {
+  if (typeof value !== "string") return [];
+  const seen = new Set();
+  const out = [];
+  for (const rawLine of value.split(/\r?\n/)) {
+    let line = rawLine.trim();
+    if (!line) continue;
+    let except = false;
+    if (line.startsWith("!")) {
+      except = true;
+      line = line.slice(1).trim();
+    }
+    let confidence;
+    const m = line.match(/\s*(?:@|>=?|:)\s*([1-5])\s*$/);
+    if (m) {
+      confidence = Number(m[1]);
+      line = line.slice(0, m.index).trim();
+    }
+    // A dangling AND operator ("Gaming +", a lone "+") is not a tag.
+    line = line.replace(/^(?:\+\s*)+|(?:\s*\+)+$/g, "").trim();
+    if (!line) continue;
+    const names = [];
+    const nameKeys = new Set();
+    for (const part of line.split(/\s+\+\s+/)) {
+      const partName = part.trim().slice(0, 100);
+      if (!partName || nameKeys.has(partName.toLowerCase())) continue;
+      nameKeys.add(partName.toLowerCase());
+      names.push(partName);
+      if (names.length >= 6) break;
+    }
+    if (!names.length) continue;
+    const key = (except ? "!" : "") + [...nameKeys].sort().join("+");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const entry = { name: names[0] };
+    if (confidence) entry.confidence = confidence;
+    if (names.length > 1) entry.also = names.slice(1);
+    if (except) entry.except = true;
+    out.push(entry);
+    if (out.length >= 100) break;
+  }
+  return out;
+}
+function tagListToText(list) {
+  if (!Array.isArray(list)) return "";
+  return list
+    .map((e) => {
+      if (!e || typeof e.name !== "string") return "";
+      const names = [e.name, ...(Array.isArray(e.also) ? e.also : [])].join(" + ");
+      return (e.except ? "!" : "") + names + (e.confidence ? ` @${e.confidence}` : "");
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
 function parsePlatformAuthorsTextarea(groupType, value) {
   const validAuthors = [];
   const invalidAuthors = [];
@@ -3436,6 +3533,12 @@ function createDefaultGroup(groupType = DEFAULT_GROUP_TYPE) {
     platformVideoMode: "all",
     platformAuthorMode: "all",
     platformAuthors: [],
+    platformTagMode: "all",
+    platformTags: [],
+    platformTagDefaultConfidence: 4,
+    platformTagBlockUntagged: false,
+    platformTagBlockPage: true,
+    platformTagEffect: "dim",
     redditMode: "all",
     redditSubreddits: [],
     discordMode: "all",
@@ -3555,6 +3658,14 @@ function sanitizeGroups(groups) {
             .filter(Boolean)
         )
       ],
+      platformTagMode: normalizeTagFilterModeChoice(group?.platformTagMode),
+      platformTags: parseTagListTextarea(
+        Array.isArray(group?.platformTags) ? tagListToText(group.platformTags) : String(group?.platformTags ?? "")
+      ),
+      platformTagDefaultConfidence: clampTagFilterConfidence(group?.platformTagDefaultConfidence, 4),
+      platformTagBlockUntagged: Boolean(group?.platformTagBlockUntagged),
+      platformTagBlockPage: group?.platformTagBlockPage !== false,
+      platformTagEffect: group?.platformTagEffect === "block" ? "block" : "dim",
       redditSubreddits: [
         ...new Set(rawRedditSubreddits.map(normalizeRedditSubredditInput).filter(Boolean))
       ],
@@ -3706,6 +3817,12 @@ function getSerializableGroupSnapshot(group) {
     platformVideoMode: group.platformVideoMode,
     platformAuthorMode: group.platformAuthorMode,
     platformAuthors: [...group.platformAuthors],
+    platformTagMode: normalizeTagFilterModeChoice(group.platformTagMode),
+    platformTags: Array.isArray(group.platformTags) ? group.platformTags.map((e) => ({ ...e })) : [],
+    platformTagDefaultConfidence: clampTagFilterConfidence(group.platformTagDefaultConfidence, 4),
+    platformTagBlockUntagged: Boolean(group.platformTagBlockUntagged),
+    platformTagBlockPage: group.platformTagBlockPage !== false,
+    platformTagEffect: group.platformTagEffect === "block" ? "block" : "dim",
     redditMode: group.redditMode,
     redditSubreddits: [...group.redditSubreddits],
     discordMode: group.discordMode,
@@ -3829,6 +3946,12 @@ function groupToDraft(group) {
     platformVideoMode: normalizeVideoMode(group.platformVideoMode),
     platformAuthorMode: normalizePlatformAuthorMode(group.platformAuthorMode),
     platformAuthorsText: group.platformAuthors.join("\n"),
+    platformTagMode: normalizeTagFilterModeChoice(group.platformTagMode),
+    platformTagsText: tagListToText(group.platformTags),
+    platformTagDefaultConfidence: clampTagFilterConfidence(group.platformTagDefaultConfidence, 4),
+    platformTagBlockUntagged: Boolean(group.platformTagBlockUntagged),
+    platformTagBlockPage: group.platformTagBlockPage !== false,
+    platformTagEffect: group.platformTagEffect === "block" ? "block" : "dim",
     redditMode: normalizeRedditMode(group.redditMode, group.redditSubreddits),
     redditSubredditsText: group.redditSubreddits.join("\n"),
     discordMode: normalizeDiscordMode(group.discordMode, group.discordTargets),
@@ -4880,6 +5003,30 @@ function renderEditor(now = Date.now()) {
   platformAuthorModeField.value = normalizePlatformAuthorMode(
     draft?.platformAuthorMode ?? group.platformAuthorMode
   );
+  // Content-tag filter fields.
+  const tagCompatible = isTagFilterCompatible(group.groupType);
+  const tagMode = normalizeTagFilterModeChoice(draft?.platformTagMode ?? group.platformTagMode);
+  platformTagModeField.value = tagMode;
+  platformTagsField.value = draft?.platformTagsText ?? tagListToText(group.platformTags);
+  platformTagDefaultConfidenceField.value = String(
+    clampTagFilterConfidence(draft?.platformTagDefaultConfidence ?? group.platformTagDefaultConfidence, 4)
+  );
+  platformTagEffectField.value =
+    (draft?.platformTagEffect ?? group.platformTagEffect) === "block" ? "block" : "dim";
+  platformTagBlockUntaggedField.checked = Boolean(
+    draft?.platformTagBlockUntagged ?? group.platformTagBlockUntagged
+  );
+  if (platformTagBlockPageField) {
+    platformTagBlockPageField.checked = (draft?.platformTagBlockPage ?? group.platformTagBlockPage) !== false;
+  }
+  if (platformTagFields) platformTagFields.classList.toggle("hidden", !tagCompatible);
+  if (platformTagListBlock) platformTagListBlock.classList.toggle("hidden", tagMode === "all");
+  refreshTagSuggestions(
+    document.getElementById("platformTagSuggestions"), platformTagsField,
+    tagCompatible && tagMode !== "all" ? group.groupType : ""
+  );
+  // Honoured in both modes now (it lives inside the list block, hidden for "all").
+  if (platformTagBlockUntaggedRow) platformTagBlockUntaggedRow.classList.remove("hidden");
   redditSubredditsField.value = draft?.redditSubredditsText ?? group.redditSubreddits.join("\n");
   redditModeField.value = normalizeRedditMode(
     draft?.redditMode ?? group.redditMode,
@@ -5161,6 +5308,12 @@ function stashCurrentDraft() {
     platformVideoMode: platformVideoModeField.value,
     platformAuthorMode: platformAuthorModeField.value,
     platformAuthorsText: platformAuthorsField.value,
+    platformTagMode: platformTagModeField.value,
+    platformTagsText: platformTagsField.value,
+    platformTagDefaultConfidence: platformTagDefaultConfidenceField.value,
+    platformTagBlockUntagged: platformTagBlockUntaggedField.checked,
+    platformTagBlockPage: platformTagBlockPageField ? platformTagBlockPageField.checked : true,
+    platformTagEffect: platformTagEffectField.value,
     redditMode: redditModeField.value,
     redditSubredditsText: redditSubredditsField.value,
     discordMode: discordModeField.value,
@@ -5706,6 +5859,16 @@ function buildUpdatedGroupFromDraft(group, draft, { strict = true } = {}) {
       platformVideoMode: normalizeVideoMode(draft.platformVideoMode),
       platformAuthorMode: authorMode,
       platformAuthors: usesAuthorAxis ? authorResults.validAuthors : group.platformAuthors,
+      platformTagMode: isTagFilterCompatible(group.groupType)
+        ? normalizeTagFilterModeChoice(draft.platformTagMode)
+        : group.platformTagMode,
+      platformTags: isTagFilterCompatible(group.groupType)
+        ? parseTagListTextarea(draft.platformTagsText)
+        : group.platformTags,
+      platformTagDefaultConfidence: clampTagFilterConfidence(draft.platformTagDefaultConfidence, 4),
+      platformTagBlockUntagged: Boolean(draft.platformTagBlockUntagged),
+      platformTagBlockPage: draft.platformTagBlockPage !== false,
+      platformTagEffect: draft.platformTagEffect === "block" ? "block" : "dim",
       surfaceHides: normalizeSurfaceHides(
         Array.isArray(draft.surfaceHides) ? draft.surfaceHides : group.surfaceHides,
         group.groupType
@@ -7031,6 +7194,182 @@ if (runCustomGroupButton) {
   });
 }
 
+// Platforms whose feed-predicate engine can act on content tags (helpers.js
+// PLATFORM_LIST). Others (e.g. reddit, bilibili) would need the predicate
+// engine extended before a tag rule could hide/blackout their cards.
+const CONTENT_TAG_PLATFORMS = new Set(["youtube", "tiktok", "instagram", "facebook", "twitch"]);
+
+// Turn the no-code builder fields into a custom-rule source. Uses the platform
+// predicate's dim() (thumbnail blackout, correctable) or hide() (remove card).
+// Supports a LIST of tags (each with an optional per-tag confidence over the
+// default), "block certain tags" (include) / "block all except" (exclude), and
+// a configurable untagged behavior for the exclude case.
+function generateContentTagRuleSource({ platform, mode, tags, defaultConfidence, blockUntagged, effect }) {
+  const p = CONTENT_TAG_PLATFORMS.has(platform) ? platform : "youtube";
+  const method = effect === "block" ? "hide" : "dim";
+  const def = Math.min(5, Math.max(1, Number(defaultConfidence) || 4));
+  // Resolve each tag's threshold now, so the generated predicate stays simple.
+  // n = names that must ALL be present (AND), c = threshold, x = carve-out.
+  const list = (Array.isArray(tags) ? tags : []).map((e) => ({
+    n: [String(e && e.name), ...(Array.isArray(e && e.also) ? e.also.map(String) : [])],
+    c: Number.isFinite(e && e.confidence) ? Math.min(5, Math.max(1, e.confidence)) : def,
+    x: Boolean(e && e.except)
+  }));
+  const listLiteral = JSON.stringify(list);
+  const isExclude = mode === "exclude";
+  // Same decision as the platform tag filter (content.js matchesTagFilter).
+  const body =
+    "    const list = " + listLiteral + ";\n" +
+    "    const tags = Array.isArray(item.tags) ? item.tags : [];\n" +
+    "    const hit = (e) => e.n.every((n) => tags.some((t) => t && t.name === n && (t.confidence || 0) >= e.c));\n" +
+    "    const listMatch = list.some((e) => !e.x && hit(e)) && !list.some((e) => e.x && hit(e));\n" +
+    "    if (listMatch) return " + (isExclude ? "false" : "true") + ";\n" +
+    "    const hasConfident = tags.some((t) => (t && t.confidence || 0) >= " + def + ");\n" +
+    "    if (!hasConfident) return " + (blockUntagged ? "true" : "false") + ";\n" +
+    "    return " + (isExclude ? "true" : "false") + ";\n";
+  return (
+    "(events, helpers) => {\n" +
+    "  const p = helpers.platform()." + p + "();\n" +
+    "  p." + method + "((item) => {\n" +
+    body +
+    "  });\n" +
+    "  p.rescan();\n" +
+    "}\n"
+  );
+}
+
+// ── Classifier tag-name suggestions ──────────────────────────────────────
+// Clickable chips under a tag-list textarea, fed by the classifier's own
+// taxonomy for that platform (so a filter names tags that actually exist — a
+// typo'd tag silently never matches). Hidden when the classifier is unreachable.
+const tagNameCache = new Map(); // platform -> { at, names }
+const TAG_NAME_CACHE_MS = 60_000;
+function fetchClassifierTagNames(platform) {
+  const cached = tagNameCache.get(platform);
+  if (cached && Date.now() - cached.at < TAG_NAME_CACHE_MS) return Promise.resolve(cached.names);
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: "vault-classifier-tag-names", platform }, (response) => {
+        const failed = chrome.runtime.lastError || !response || response.ok !== true;
+        const names = !failed && Array.isArray(response.names) ? response.names.filter((n) => typeof n === "string" && n) : [];
+        if (!failed) tagNameCache.set(platform, { at: Date.now(), names });
+        resolve(names);
+      });
+    } catch (_) {
+      resolve([]);
+    }
+  });
+}
+function usedTagNames(textarea) {
+  const used = new Set();
+  for (const entry of parseTagListTextarea(textarea?.value || "")) {
+    for (const name of [entry.name, ...(entry.also || [])]) used.add(name.toLowerCase());
+  }
+  return used;
+}
+function renderTagSuggestions(container, textarea, names) {
+  if (!container || !textarea) return;
+  container.replaceChildren();
+  container.classList.toggle("hidden", names.length === 0);
+  if (names.length === 0) return;
+  const label = document.createElement("span");
+  label.className = "tag-suggestions-label";
+  label.textContent = t("tagFilter.available");
+  container.appendChild(label);
+  const used = usedTagNames(textarea);
+  for (const name of names) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.textContent = name;
+    const isUsed = used.has(name.toLowerCase());
+    chip.classList.toggle("used", isUsed);
+    chip.disabled = isUsed;
+    chip.addEventListener("click", () => {
+      const current = textarea.value.replace(/\s+$/, "");
+      textarea.value = current ? `${current}\n${name}` : name;
+      // Fire the same event typing would, so drafts/autosave react.
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      renderTagSuggestions(container, textarea, names);
+    });
+    container.appendChild(chip);
+  }
+}
+const tagSuggestionRequests = new WeakMap(); // container -> latest request token
+function refreshTagSuggestions(container, textarea, platform) {
+  if (!container || !textarea) return;
+  const token = {};
+  tagSuggestionRequests.set(container, token);
+  if (!platform) { renderTagSuggestions(container, textarea, []); return; }
+  fetchClassifierTagNames(platform).then((names) => {
+    if (tagSuggestionRequests.get(container) !== token) return; // a newer request won
+    renderTagSuggestions(container, textarea, names);
+  });
+}
+
+// Keep chip "used" state live while typing, and follow the builder's platform.
+function bindTagSuggestions(containerId, textarea, platformOf) {
+  const container = document.getElementById(containerId);
+  if (!container || !textarea) return;
+  textarea.addEventListener("input", () => {
+    const cached = tagNameCache.get(platformOf());
+    if (cached) renderTagSuggestions(container, textarea, cached.names);
+  });
+}
+bindTagSuggestions("platformTagSuggestions", platformTagsField, () => String(getSelectedGroup()?.groupType || ""));
+bindTagSuggestions("contentTagSuggestions", contentTagNamesField, () => contentTagPlatformField?.value || "youtube");
+if (contentTagPlatformField) {
+  const refreshBuilderSuggestions = () => refreshTagSuggestions(
+    document.getElementById("contentTagSuggestions"), contentTagNamesField, contentTagPlatformField.value || "youtube"
+  );
+  contentTagPlatformField.addEventListener("change", refreshBuilderSuggestions);
+  contentTagNamesField?.addEventListener("focus", refreshBuilderSuggestions, { once: true });
+}
+
+function setContentTagStatus(text, isError) {
+  if (!contentTagStatus) return;
+  contentTagStatus.textContent = text || "";
+  contentTagStatus.className = isError ? "run-status error" : "run-status";
+}
+
+// The untagged toggle only matters for "block all except" (allow-list) mode.
+function syncContentTagBuilderMode() {
+  if (!contentTagBlockUntaggedRow) return;
+  const isExclude = contentTagModeField?.value === "exclude";
+  contentTagBlockUntaggedRow.classList.toggle("hidden", !isExclude);
+}
+if (contentTagModeField) {
+  contentTagModeField.addEventListener("change", syncContentTagBuilderMode);
+}
+
+if (contentTagApplyButton) {
+  contentTagApplyButton.addEventListener("click", async () => {
+    const group = getSelectedGroup();
+    if (!group || group.groupType !== "custom" || blockingRulesField.disabled) return;
+    const platform = contentTagPlatformField?.value || "youtube";
+    const mode = contentTagModeField?.value === "exclude" ? "exclude" : "include";
+    const tags = parseTagListTextarea(contentTagNamesField?.value || "");
+    if (tags.length === 0) {
+      setContentTagStatus(t("contentTag.needTag"), true);
+      contentTagNamesField?.focus();
+      return;
+    }
+    const defaultConfidence = Number(contentTagConfidenceField?.value) || 4;
+    const effect = contentTagEffectField?.value === "block" ? "block" : "dim";
+    const blockUntagged = Boolean(contentTagBlockUntaggedField?.checked);
+    // Generate the rule into the shared source field, then run it through the
+    // same compile+activate pipeline as the Run button (no manual step).
+    blockingRulesField.value = generateContentTagRuleSource({
+      platform, mode, tags, defaultConfidence, blockUntagged, effect
+    });
+    stashCurrentDraft();
+    render();
+    scheduleAutosave();
+    setContentTagStatus(t("contentTag.applying"), false);
+    await runSelectedCustomGroup();
+    setContentTagStatus(t("contentTag.applied", { count: tags.length }), false);
+  });
+}
+
 function toggleAiPromptPanel() {
   const group = getSelectedGroup();
   if (!group || group.groupType !== "custom") return;
@@ -7195,6 +7534,31 @@ platformAuthorModeField.addEventListener("change", () => {
   renderGroupList();
   scheduleAutosave();
 });
+
+// Content-tag filter fields.
+if (platformTagModeField) {
+  platformTagModeField.addEventListener("change", () => {
+    stashCurrentDraft();
+    render(); // re-toggles the tag list + untagged row for the new mode
+    renderGroupList();
+    scheduleAutosave();
+  });
+}
+for (const field of [platformTagsField, platformTagDefaultConfidenceField, platformTagEffectField]) {
+  if (!field) continue;
+  field.addEventListener("input", () => {
+    stashCurrentDraft();
+    renderGroupList();
+    scheduleAutosave();
+  });
+}
+for (const field of [platformTagBlockUntaggedField, platformTagBlockPageField]) {
+  if (!field) continue;
+  field.addEventListener("change", () => {
+    stashCurrentDraft();
+    scheduleAutosave();
+  });
+}
 
 redditSubredditsField.addEventListener("input", () => {
   stashCurrentDraft();

@@ -454,10 +454,27 @@ function getCurrentFeedSite() {
   return getPlatformGroupTypeForHost(hostname);
 }
 
+// Classifier tags for a feed card (id/name/confidence), from the Vault tag
+// pipeline in this same isolated world. Empty until the pill resolves. Shared by
+// the platform feed-filter path (content-tag filter) and custom rules.
+function getFeedCardTags(card) {
+  try {
+    if (typeof window !== "undefined" && typeof window.vaultTagsForCard === "function") {
+      const resolved = window.vaultTagsForCard(card);
+      if (Array.isArray(resolved)) {
+        return resolved
+          .filter((t) => t && typeof t.name === "string")
+          .map((t) => ({ id: t.id, name: t.name, confidence: Number.isInteger(t.confidence) ? t.confidence : 0 }));
+      }
+    }
+  } catch (_) {}
+  return [];
+}
+
 function getFeedCardData(card) {
   const currentSite = getCurrentFeedSite();
   if (currentSite === "reddit") {
-    return { redditSubreddit: extractRedditSubredditFromCard(card) };
+    return { redditSubreddit: extractRedditSubredditFromCard(card), tags: getFeedCardTags(card) };
   }
   if (currentSite === "twitter") {
     const creators = [
@@ -482,12 +499,13 @@ function getFeedCardData(card) {
           .filter(Boolean)
       )
     ];
-    return { videoForm: videoContext.form, creators };
+    return { videoForm: videoContext.form, creators, tags: getFeedCardTags(card) };
   }
   if (isPostCard(card)) {
     return {
       videoForm: "post",
-      creators: getFeedCardCreators(card)
+      creators: getFeedCardCreators(card),
+      tags: getFeedCardTags(card)
     };
   }
   const href = getFeedCardHref(card, "youtube");
@@ -497,12 +515,49 @@ function getFeedCardData(card) {
   const videoContext = detectVideoSiteContext(normalizeHostname(url.hostname), url.pathname);
   return {
     videoForm: videoContext.form,
-    creators: getFeedCardCreators(card)
+    creators: getFeedCardCreators(card),
+    tags: getFeedCardTags(card)
   };
+}
+
+// The ONE content-tag decision (feed cards and the page's own entry both use
+// it). An entry matches when its tag — and every `also` tag (AND) — is present
+// at/above the entry's confidence. The LIST matches when some normal entry
+// matches and no carve-out (`except`) entry does.
+//   include (block-list): block when the list matches.
+//   exclude (allow-list): block unless the list matches.
+// Content with no confident tag that the list did not decide is blocked only
+// when the user opted in (blockUntagged) — in either mode.
+function matchesTagFilter(tf, rawTags) {
+  if (!tf) return false;
+  const cardTags = Array.isArray(rawTags) ? rawTags : [];
+  const def = Number.isFinite(tf.defaultConfidence) ? tf.defaultConfidence : 4;
+  const list = Array.isArray(tf.tags) ? tf.tags : [];
+  const has = (name, need) => cardTags.some(
+    (t) => t && t.name === name && (Number(t.confidence) || 0) >= need
+  );
+  const entryMatches = (entry) => {
+    if (!entry || typeof entry.name !== "string") return false;
+    const need = Number.isFinite(entry.confidence) ? entry.confidence : def;
+    if (!has(entry.name, need)) return false;
+    return (Array.isArray(entry.also) ? entry.also : []).every((name) => has(name, need));
+  };
+  const listMatch = list.some((entry) => entry && !entry.except && entryMatches(entry))
+    && !list.some((entry) => entry && entry.except && entryMatches(entry));
+  if (tf.mode !== "include" && tf.mode !== "exclude") return false;
+  if (listMatch) return tf.mode === "include";
+  const hasConfidentTag = cardTags.some((t) => (Number(t && t.confidence) || 0) >= def);
+  if (!hasConfidentTag) return Boolean(tf.blockUntagged);
+  return tf.mode === "exclude";
 }
 
 function matchesFeedFilter(cardData, filter) {
   if (!cardData || !filter) return false;
+  // Content-tag filter (from platform rules). Matches on the card's classifier
+  // tags. "include" blocks a card that carries a listed tag at/above its
+  // confidence; "exclude" blocks a card that does NOT (an allowlist), with a
+  // toggle for whether untagged/low-confidence cards are blocked too.
+  if (filter.tagFilter) return matchesTagFilter(filter.tagFilter, cardData.tags);
   if (filter.site === "reddit") {
     if (!cardData.redditSubreddit) return false;
     const subreddits = Array.isArray(filter.subreddits) ? filter.subreddits : [];
@@ -821,24 +876,11 @@ function cbApplyCard(card) {
   }
 }
 
-// ── Content-tag policy verdict source ──────────────────────────────────────
-// The app resolves each classified entry's platform policy (allow/dim/block on
-// content tags) and ships a per-entry `feedAction`. The tag pipeline calls this
-// with the card + that action. It's a first-class verdict source ("tag") in the
-// same ledger, so it composes with creator/custom rules: an explicit user
-// "allow" rescue or "hide" still wins (the tag group has no feedOrder index, so
-// it sits at lowest priority). DIM is the intended default — correctable.
-const CB_TAG_POLICY_GROUP_ID = "__vault_tag_policy__";
-function cbApplyTagPolicy(card, feedAction) {
-  if (!card) return;
-  const verdict = feedAction === "block" ? "hide" : feedAction === "dim" ? "dim" : null;
-  cbSetCardVerdict(card, CB_TAG_POLICY_GROUP_ID, verdict, "tag");
-  cbApplyCard(card);
-}
-if (typeof window !== "undefined") window.cbApplyTagPolicy = cbApplyTagPolicy;
-
 // ── Content-tag PAGE verdict ───────────────────────────────────────────────
-// The watch/short page's own entry gets the policy's `pageAction`. "block"
+// Content-block policy lives HERE, in the extension: the classifier only tags.
+// A platform group's content-tag filter may also cover a matching video's OWN
+// page (`pageEffect: "block"`, see background.js pushTagFilterEntry); the page
+// entry's tags are matched by the very same matchesFeedFilter as feed cards. "block"
 // blacks out the PLAYER in place (opaque panel, video kept paused) and leaves
 // title, author and the Vault pill live, so correcting the tag lifts it
 // instantly — the same live-function-of-tags rule as feed cards. It never
@@ -948,6 +990,50 @@ function cbApplyTagPagePolicy(root, pageAction, meta) {
 }
 if (typeof window !== "undefined") window.cbApplyTagPagePolicy = cbApplyTagPagePolicy;
 
+// The page's own entry, as last reported by the tag pipeline. Kept so a change
+// to the filters (group edited, count-down elapsed, snooze) re-decides the page
+// without waiting for another tag event.
+let cbTagPageContext = null;
+
+function cbTagPageVerdict(tags) {
+  for (const filter of latestFeedFilters) {
+    if (!filter || !filter.tagFilter || filter.pageEffect !== "block") continue;
+    if (filter.enforce === false) continue; // count-down group still within its allowance
+    if (matchesFeedFilter({ tags }, filter)) return "block";
+  }
+  return "allow";
+}
+
+// Decide + apply the page verdict for the page's own entry. Called by the tag
+// pipeline whenever that entry's tags settle or change (meta.settled === false
+// while it is still "Tagging…": never block on a provisional state), and again
+// by updateFeedFilters. `meta === null` forgets the page (its root went away).
+function cbEvaluateTagPage(root, meta) {
+  if (!root || !meta) {
+    if (cbTagPageContext && (!root || cbTagPageContext.root === root)) {
+      cbApplyTagPagePolicy(cbTagPageContext.root, "allow", cbTagPageContext);
+      cbTagPageContext = null;
+    }
+    return "allow";
+  }
+  cbTagPageContext = { root, entryID: meta.entryID, platform: meta.platform, settled: meta.settled !== false };
+  const action = cbTagPageContext.settled ? cbTagPageVerdict(getFeedCardTags(root)) : "allow";
+  cbApplyTagPagePolicy(root, action, cbTagPageContext);
+  return action;
+}
+
+// Tags changed for something on this page (resolved, pushed, or corrected):
+// re-run the tag filters now rather than waiting for a DOM mutation — the pill
+// may render inside a shadow root the feed observer cannot see.
+function cbReapplyTagFilters() {
+  if (latestFeedFilters.length > 0) scheduleApplyFeedFilters();
+  if (cbTagPageContext) cbEvaluateTagPage(cbTagPageContext.root, cbTagPageContext);
+}
+if (typeof window !== "undefined") {
+  window.cbEvaluateTagPage = cbEvaluateTagPage;
+  window.cbReapplyTagFilters = cbReapplyTagFilters;
+}
+
 function collectNavElementsToHide(filter) {
   if (!filter || filter.authorMode !== "all") return [];
   const containers = new Set();
@@ -1049,9 +1135,12 @@ function applyFeedFilters() {
         for (const filter of activeFilters) {
           if (!matchesFeedFilter(cardData, filter)) continue;
           // Exposure: a match means the group's usage timer should accrue,
-          // regardless of whether we hide the card right now.
-          exposed.add(filter.id);
-          const verdict = cbEffectVerdict(filter.id);
+          // regardless of whether we hide the card right now. A tag filter is a
+          // synthetic sibling of its group, so credit the real group id.
+          exposed.add(filter.baseGroupId || filter.id);
+          // Tag filters carry their own effect (dim = blackout, hide = remove);
+          // author/video filters use the group's block/allow effect.
+          const verdict = filter.effectVerdict || cbEffectVerdict(filter.id);
           // Allow filters always rescue; block filters only hide while
           // enforcing (instant, or a count-down past its allowance).
           if (verdict === "allow" || filter.enforce !== false) {
@@ -1078,6 +1167,7 @@ function applyNavShelfHides() {
   if (currentSite !== "youtube") return;
   for (const filter of latestFeedFilters) {
     if (filter?.site !== "youtube") continue;
+    if (filter.tagFilter) continue; // content-tag filters act on cards, not chrome
     if (filter.enforce === false) continue;
     if (cbEffectVerdict(filter.id) === "allow") continue;
     for (const navElement of collectNavElementsToHide(filter)) hideSurfaceElement(navElement);
@@ -1093,6 +1183,7 @@ function scheduleApplyFeedFilters() {
 function updateFeedFilters(filters) {
   latestFeedFilters = Array.isArray(filters) ? filters : [];
   reconcilePageMutations();
+  if (cbTagPageContext) cbEvaluateTagPage(cbTagPageContext.root, cbTagPageContext);
 }
 
 // Surface hides ("hide elements" toggles) are plain CSS-selector hides driven
@@ -3541,9 +3632,14 @@ async function __cb_scanFeedPredicates() {
       // effects map.
       const effects = (results[i] && results[i].effects) || {};
       for (const groupId of matched) {
-        const verdict = effects[groupId] === "allow"
+        // allow → rescue; dim → black out the thumbnail in place; block → hide
+        // the card. Falls back to the group effect for older replies.
+        const effect = effects[groupId];
+        const verdict = effect === "allow"
           ? "allow"
-          : (effects[groupId] === "block" ? "hide" : cbEffectVerdict(groupId));
+          : effect === "dim"
+            ? "dim"
+            : (effect === "block" ? "hide" : cbEffectVerdict(groupId));
         cbSetCardVerdict(card, groupId, verdict, "custom");
       }
       cbCustomSigCache.set(card, batch[i].sig);
