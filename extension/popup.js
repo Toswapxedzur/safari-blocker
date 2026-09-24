@@ -287,7 +287,6 @@ const blockingRulesEditor = document.getElementById("blockingRulesEditor");
 const blockingRulesHighlight = document.getElementById("blockingRulesHighlight");
 const blockingRulesField = document.getElementById("blockingRules");
 const blockingRulesLint = document.getElementById("blockingRulesLint");
-const openRuleTemplatesButton = document.getElementById("openRuleTemplatesButton");
 const platformRulesCard = document.getElementById("platformRulesCard");
 const platformRulePlatformField = document.getElementById("platformRulePlatform");
 const platformVideoCard = document.getElementById("platformVideoFields");
@@ -318,6 +317,7 @@ const platformTagEffectField = document.getElementById("platformTagEffect");
 const platformTagBlockUntaggedRow = document.getElementById("platformTagBlockUntaggedRow");
 const platformTagBlockUntaggedField = document.getElementById("platformTagBlockUntagged");
 const platformTagBlockPageField = document.getElementById("platformTagBlockPage");
+const platformTagCoverUntilTaggedField = document.getElementById("platformTagCoverUntilTagged");
 const platformBlockHomePageField = document.getElementById("platformBlockHomePage");
 const skipToNextOnBlockRow = document.getElementById("skipToNextOnBlockRow");
 const skipToNextOnBlockField = document.getElementById("skipToNextOnBlock");
@@ -397,19 +397,9 @@ const manualModal = document.getElementById("manualModal");
 const manualStatus = document.getElementById("manualStatus");
 const manualContent = document.getElementById("manualContent");
 const manualCloseButton = document.getElementById("manualCloseButton");
-const templateModal = document.getElementById("templateModal");
-const templateGrid = document.getElementById("templateGrid");
-const templateStatus = document.getElementById("templateStatus");
-const templateCloseButton = document.getElementById("templateCloseButton");
-const templateFilterField = document.getElementById("templateFilter");
-const templateApplyButton = document.getElementById("templateApplyButton");
 const settingsButton = document.getElementById("settingsButton");
 const settingsModal = document.getElementById("settingsModal");
 const settingsCloseButton = document.getElementById("settingsCloseButton");
-const settingsTickRateField = document.getElementById("settingsTickRate");
-const settingsAutosaveDebounceField = document.getElementById("settingsAutosaveDebounce");
-const settingsDebugModeField = document.getElementById("settingsDebugMode");
-const settingsShowOnPageLogToastsField = document.getElementById("settingsShowOnPageLogToasts");
 const settingsDefaultSnoozeMinutesField = document.getElementById("settingsDefaultSnoozeMinutes");
 const settingsDefaultFallbackUrlField = document.getElementById("settingsDefaultFallbackUrl");
 const localFolderChooseButton = document.getElementById("localFolderChooseButton");
@@ -419,14 +409,7 @@ let localFolderHandle = null;
 const settingsResetButton = document.getElementById("settingsResetButton");
 const settingsStatus = document.getElementById("settingsStatus");
 const classifierCollectionToggle = document.getElementById("classifierCollectionToggle");
-const connectionGroupSection = document.getElementById("connectionGroupSection");
-const connectionGroupHint = document.getElementById("connectionGroupHint");
-const connectionGroupDisconnected = document.getElementById("connectionGroupDisconnected");
-const connectionGroupConnected = document.getElementById("connectionGroupConnected");
-const connectionGroupProgram = document.getElementById("connectionGroupProgram");
-const connectionGroupConnectButton = document.getElementById("connectionGroupConnectButton");
-const connectionGroupDisconnectButton = document.getElementById("connectionGroupDisconnectButton");
-const connectionGroupMembers = document.getElementById("connectionGroupMembers");
+const classifierTaggingModeField = document.getElementById("classifierTaggingMode");
 const dayCheckboxes = Array.from(daysGrid.querySelectorAll('input[type="checkbox"]'));
 
 const state = {
@@ -448,11 +431,7 @@ const state = {
   confirmIntervalId: null,
   unfreezeFlow: null,
   isManualOpen: false,
-  isTemplateOpen: false,
   manualCache: {},
-  selectedTemplateId: null,
-  templateFilterTags: [],
-  templateDrafts: {},
   suppressGroupStorageUpdatesUntil: 0,
   panelWidth: 300,
   aiPromptGroupId: null,
@@ -496,8 +475,10 @@ const state = {
 // This remains separate from the group-sync connection. Its browser evidence
 // requests share the public broker but never receive a group definition.
 const CLASSIFIER_BRIDGE_SETTINGS_KEY = "vaultClassifierSettings";
+const CLASSIFIER_TAGGING_MODES = ["whenFiltering", "always", "paused"];
 const DEFAULT_CLASSIFIER_BRIDGE_SETTINGS = Object.freeze({
-  collectionEnabled: true
+  collectionEnabled: true,
+  taggingMode: "whenFiltering"
 });
 let classifierBridgeSettings = { ...DEFAULT_CLASSIFIER_BRIDGE_SETTINGS };
 
@@ -505,7 +486,8 @@ function sanitizeClassifierBridgeSettings(raw) {
   return {
     // Existing deliberate opt-outs stay off; new extension settings collect by
     // default once the matching local app platform is enabled.
-    collectionEnabled: !raw || raw.collectionEnabled !== false
+    collectionEnabled: !raw || raw.collectionEnabled !== false,
+    taggingMode: raw && CLASSIFIER_TAGGING_MODES.includes(raw.taggingMode) ? raw.taggingMode : "whenFiltering"
   };
 }
 
@@ -529,6 +511,7 @@ function classifierBridgeStorageSet(next) {
 
 function renderClassifierBridgeSettings() {
   if (classifierCollectionToggle) classifierCollectionToggle.checked = classifierBridgeSettings.collectionEnabled;
+  if (classifierTaggingModeField) classifierTaggingModeField.value = classifierBridgeSettings.taggingMode;
 }
 
 async function loadClassifierBridgeSettings() {
@@ -866,8 +849,8 @@ function applyConnectionStatus(raw) {
     error: typeof incoming.error === "string" ? incoming.error : "",
     hubProgram: window.CBBridgeProtocol.hubProgramFromStatus(incoming)
   };
-  // The per-group panel lives in the editor (always visible), so keep it fresh.
-  refreshConnectionGroupPanel();
+  // The bridge mirror lives in the editor (always visible), so keep it fresh.
+  refreshBridgeMirror();
   if (!wasOnline && bridgeIsOnline()) {
     announceGroups();
     requestClusters();
@@ -893,26 +876,11 @@ function requestConnectionStatus() {
 }
 
 // ---------------------------------------------------------------------------
-// Per-group web-app bridge: link a Default/Custom group with the same-named
-// group on another connected program (a "cluster"). The hub is the single
-// source of truth for cluster membership; this layer only renders it and sends
-// connect/disconnect intents.
+// Web-app bridge: same-named Default/Custom groups auto-link into one shared
+// "cluster" across every connected program whenever a peer is present. The hub
+// is the single source of truth for cluster membership; there is no manual
+// link/unlink — this layer only renders the read-only mirror of a cluster.
 // ---------------------------------------------------------------------------
-
-const CONNECTION_PROGRAM_LABELS = {
-  macapp: "Mac Vault",
-  windowsapp: "Windows Vault",
-  chrome: "Chrome",
-  edge: "Edge",
-  firefox: "Firefox",
-  safari: "Safari",
-  opera: "Opera",
-  browser: "Browser"
-};
-
-function connectionProgramLabel(programId) {
-  return CONNECTION_PROGRAM_LABELS[programId] || programId || "?";
-}
 
 function bridgeIsOnline() {
   const s = state.connectionStatus || {};
@@ -951,106 +919,6 @@ function clusterLocalGroup(cluster) {
   return window.CBBridgeProtocol.groupForCluster(state.groups, cluster, LOCAL_PROGRAM_ID);
 }
 
-// Programs the user can link to right now (other connected endpoints). A client
-// is implicitly connected to the authenticated native hub; the hub sees peers.
-function bridgeConnectablePrograms() {
-  if (!bridgeIsOnline()) return [];
-  const status = state.connectionStatus || {};
-  const peers = Array.isArray(status.peers) ? status.peers : [];
-  const programs = new Set();
-  for (const peer of peers) {
-    if (peer && peer.connected !== false && peer.program) programs.add(peer.program);
-  }
-  if (!IS_NATIVE_DESKTOP) {
-    const hubProgram = window.CBBridgeProtocol.hubProgramFromStatus(status);
-    if (hubProgram) programs.add(hubProgram);
-  }
-  programs.delete(LOCAL_PROGRAM_ID);
-  // Vault Classifier shares this hub for routed decisions only. It never owns
-  // a block-group roster, so it is not a valid group-link destination.
-  programs.delete("classifier");
-  programs.delete("browser");
-  programs.delete("");
-  return Array.from(programs);
-}
-
-function renderConnectionGroupPanel(group, freezeStatus) {
-  if (!connectionGroupSection) return;
-  if (!isBridgeEligibleGroup(group)) {
-    connectionGroupSection.classList.add("hidden");
-    return;
-  }
-  connectionGroupSection.classList.remove("hidden");
-
-  const cluster = groupConnectionCluster(group);
-  connectionGroupSection.classList.toggle("bridge-linked", Boolean(cluster));
-
-  if (connectionGroupConnected) connectionGroupConnected.classList.toggle("hidden", !cluster);
-  if (connectionGroupDisconnected) connectionGroupDisconnected.classList.toggle("hidden", Boolean(cluster));
-
-  if (cluster) {
-    const allOnline = clusterAllOnline(cluster);
-    connectionGroupSection.classList.toggle("bridge-offline", !allOnline);
-    if (connectionGroupMembers) {
-      connectionGroupMembers.textContent = "";
-      const members = Array.isArray(cluster.members) ? cluster.members : [];
-      for (const member of members) {
-        const isSelf = member.program === LOCAL_PROGRAM_ID;
-        // We always know our own side is present; remote members are online
-        // only when the hub says so AND our link to the hub is live.
-        const memberOnline = isSelf
-          ? true
-          : member.online !== false && bridgeIsOnline();
-        const row = document.createElement("div");
-        row.className = "connection-peer" + (memberOnline ? "" : " offline");
-        const dot = document.createElement("span");
-        dot.className = "connection-dot " + (memberOnline ? "connected" : "error");
-        const label = document.createElement("span");
-        const self = isSelf ? " (this app)" : "";
-        const offlineTag = memberOnline ? "" : " — " + t("connectionGroup.memberOffline");
-        label.textContent =
-          connectionProgramLabel(member.program) + ": " + (member.groupName || group.name) + self + offlineTag;
-        row.appendChild(dot);
-        row.appendChild(label);
-        connectionGroupMembers.appendChild(row);
-      }
-    }
-    if (connectionGroupHint) {
-      connectionGroupHint.textContent = allOnline ? "" : t("connectionGroup.clusterOffline");
-    }
-    return;
-  }
-  connectionGroupSection.classList.remove("bridge-offline");
-
-  const online = bridgeIsOnline();
-  const frozen = Boolean(freezeStatus && freezeStatus.isFrozen);
-  const programs = bridgeConnectablePrograms();
-
-  if (connectionGroupProgram) {
-    const previous = connectionGroupProgram.value;
-    connectionGroupProgram.textContent = "";
-    for (const programId of programs) {
-      const option = document.createElement("option");
-      option.value = programId;
-      option.textContent = connectionProgramLabel(programId);
-      connectionGroupProgram.appendChild(option);
-    }
-    if (programs.includes(previous)) connectionGroupProgram.value = previous;
-  }
-
-  const disabled = !online || frozen || programs.length === 0;
-  if (connectionGroupConnectButton) connectionGroupConnectButton.disabled = disabled;
-  if (connectionGroupProgram) connectionGroupProgram.disabled = disabled;
-  if (connectionGroupHint) {
-    connectionGroupHint.textContent = !online
-      ? t("connectionGroup.offline")
-      : frozen
-        ? t("connectionGroup.frozen")
-        : programs.length === 0
-          ? t("connectionGroup.noPrograms")
-          : t("connectionGroup.ready");
-  }
-}
 
 // For a clustered Default (site) group, renders the blocked-list type this
 // endpoint does NOT own as a read-only, translucent mirror beside the editable
@@ -1135,11 +1003,8 @@ function renderBridgeMirror(group) {
   }
 }
 
-function refreshConnectionGroupPanel() {
-  const group = getSelectedGroup();
-  const now = Date.now();
-  renderConnectionGroupPanel(group, group ? getFreezeStatus(group, now) : null);
-  renderBridgeMirror(group);
+function refreshBridgeMirror() {
+  renderBridgeMirror(getSelectedGroup());
 }
 
 // Re-tag group cards with the bridge-linked cluster indicator without a full rebuild.
@@ -1204,7 +1069,7 @@ function applyClusters(list) {
   if (getSelectedGroup() && !editing) {
     renderEditor();
   } else {
-    refreshConnectionGroupPanel();
+    refreshBridgeMirror();
   }
   // Warn once per offline episode: if we're linked but a cluster member is
   // offline (e.g. the Mac app isn't open), shared changes won't sync until it's
@@ -1225,25 +1090,12 @@ function applyClusters(list) {
   syncAllClusters();
 }
 
-function applyGroupRejection(reason) {
-  if (connectionGroupHint) {
-    connectionGroupHint.textContent = t("connectionGroup.rejected") + (reason || "");
-  }
-}
-
 // Native (macOS) pushes cluster membership here; the browser uses the
 // "clusters-push" runtime message instead.
 window.__cbClustersState = function (json) {
   try {
     const incoming = typeof json === "string" ? JSON.parse(json) : json;
     applyClusters(incoming);
-  } catch (_) {}
-};
-
-window.__cbGroupRejected = function (json) {
-  try {
-    const incoming = typeof json === "string" ? JSON.parse(json) : json;
-    applyGroupRejection(incoming && incoming.reason);
   } catch (_) {}
 };
 
@@ -1467,10 +1319,6 @@ function syncAllClusters() {
 
 function syncSettingsFormFromState() {
   const s = state.globalSettings || DEFAULT_GLOBAL_SETTINGS;
-  if (settingsTickRateField) settingsTickRateField.value = String(s.tickRateMs);
-  if (settingsAutosaveDebounceField) settingsAutosaveDebounceField.value = String(s.autosaveDebounceMs);
-  if (settingsDebugModeField) settingsDebugModeField.checked = Boolean(s.debugMode);
-  if (settingsShowOnPageLogToastsField) settingsShowOnPageLogToastsField.checked = s.showOnPageLogToasts !== false;
   if (settingsDefaultSnoozeMinutesField) settingsDefaultSnoozeMinutesField.value = String(s.defaultSnoozeMinutes);
   if (settingsDefaultFallbackUrlField) settingsDefaultFallbackUrlField.value = s.defaultFallbackUrl ?? "";
   if (settingsStatus) settingsStatus.textContent = "";
@@ -1495,10 +1343,13 @@ function closeSettings() {
 
 async function saveSettingsFromForm() {
   const draft = {
-    tickRateMs: settingsTickRateField?.value,
-    autosaveDebounceMs: settingsAutosaveDebounceField?.value,
-    debugMode: settingsDebugModeField?.checked ?? false,
-    showOnPageLogToasts: settingsShowOnPageLogToastsField?.checked ?? true,
+    // Dev/engine values are no longer surfaced in the UI (debug + tick/debounce
+    // are dev-only / fixed defaults); carry the stored values through a save so a
+    // developer's storage-set debug flag is not reset.
+    tickRateMs: state.globalSettings?.tickRateMs,
+    autosaveDebounceMs: state.globalSettings?.autosaveDebounceMs,
+    debugMode: state.globalSettings?.debugMode,
+    showOnPageLogToasts: state.globalSettings?.showOnPageLogToasts,
     defaultSnoozeMinutes: settingsDefaultSnoozeMinutesField?.value,
     defaultFallbackUrl: settingsDefaultFallbackUrlField?.value
   };
@@ -1559,6 +1410,7 @@ function applyStaticTranslations() {
   layoutResizer.setAttribute("aria-label", t("layout.resizeAria"));
   manualButton.setAttribute("aria-label", t("manual.button"));
   manualCloseButton.setAttribute("aria-label", t("manual.close"));
+
 }
 
 function populateLanguageOptions() {
@@ -1996,10 +1848,9 @@ function setupPlatformChipInputs() {
 }
 
 // ── Content-tag filter helpers (platform rules) ──────────────────────────
-// Platforms whose feed-predicate/card pipeline can act on content tags. Others
-// (reddit, bilibili) need that engine extended before a tag filter can work, so
-// the Tag filter control is hidden for them.
-const TAG_FILTER_PLATFORMS = new Set(["youtube", "tiktok", "instagram", "facebook", "twitch", "reddit", "bilibili"]);
+// Platforms whose feed-card pipeline can act on content tags (the three
+// parity platforms plus the video platforms that share YouTube's card model).
+const TAG_FILTER_PLATFORMS = new Set(["youtube", "tiktok", "instagram", "facebook", "twitch", "reddit", "bilibili", "twitter"]);
 function isTagFilterCompatible(groupType) {
   return TAG_FILTER_PLATFORMS.has(String(groupType || ""));
 }
@@ -2777,313 +2628,6 @@ function getLocalizedUnfreezeMessages() {
   );
 }
 
-// Templates live in templates/*.js; each file calls
-// CB_REGISTER_TEMPLATES(...) which appends to
-// window.__CUSTOM_BLOCKER_TEMPLATES. popup.html loads those
-// scripts before popup.js so the array is fully populated by
-// the time we reach this line.
-const CUSTOM_RULE_TEMPLATES = Array.isArray(window.__CUSTOM_BLOCKER_TEMPLATES)
-  ? window.__CUSTOM_BLOCKER_TEMPLATES.slice()
-  : [];
-
-function normalizeTemplateTag(tag) {
-  return String(tag ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-}
-
-function getTemplateTags(template) {
-  return [...new Set((Array.isArray(template?.tags) ? template.tags : []).map(normalizeTemplateTag).filter(Boolean))];
-}
-
-// Preferred chip order. Categories cluster on the left, then short-form
-// /addiction-prone platforms, then the rest. Tags not in this list keep
-// their template-discovery order at the tail. Reorder these lines to
-// reorder the visible chips.
-const TEMPLATE_TAG_PREFERRED_ORDER = [
-  // Categories — broad concerns first, narrower ones after.
-  "timer",
-  "count-up",
-  "schedule",
-  "feed",
-  "shorts",
-  "redirect",
-  "focus",
-  "nudge",
-  "persistence",
-  "dom",
-  "debug",
-  // Platforms — clustered by similarity (short-video first).
-  "youtube",
-  "tiktok",
-  "instagram",
-  "facebook",
-  "reddit",
-  "twitter",
-  "twitch",
-  "discord",
-  "site"
-];
-
-function getTemplateFilterOptions() {
-  const seen = new Set();
-  const collected = new Set();
-
-  for (const template of CUSTOM_RULE_TEMPLATES) {
-    for (const tag of getTemplateTags(template)) {
-      collected.add(tag);
-    }
-  }
-
-  const ordered = [];
-  for (const tag of TEMPLATE_TAG_PREFERRED_ORDER) {
-    if (collected.has(tag) && !seen.has(tag)) {
-      seen.add(tag);
-      ordered.push(tag);
-    }
-  }
-  // Append any tag the templates introduced that isn't in the curated
-  // list — keeps new templates working without forcing every author to
-  // edit the order array. They sort alphabetically for stability.
-  const tail = Array.from(collected).filter((t) => !seen.has(t)).sort();
-  for (const tag of tail) ordered.push(tag);
-
-  return ordered.map((tag) => {
-    const translationKey = `custom.templateTag.${tag}`;
-    const translated = t(translationKey);
-    return {
-      value: tag,
-      label:
-        translated !== translationKey
-          ? translated
-          : tag.replace(/-/g, " ").replace(/\b\w/g, (character) => character.toUpperCase())
-    };
-  });
-}
-
-function getFilteredTemplates() {
-  if (!Array.isArray(state.templateFilterTags) || state.templateFilterTags.length === 0) {
-    return CUSTOM_RULE_TEMPLATES;
-  }
-  return CUSTOM_RULE_TEMPLATES.filter((template) => {
-    const templateTags = getTemplateTags(template);
-    return state.templateFilterTags.every((tag) => templateTags.includes(tag));
-  });
-}
-
-function renderTemplateFilter() {
-  if (!templateFilterField) {
-    return;
-  }
-
-  const options = getTemplateFilterOptions();
-  const previousScrollLeft = templateFilterField.scrollLeft;
-  const activeTags = [...new Set((Array.isArray(state.templateFilterTags) ? state.templateFilterTags : []).map(normalizeTemplateTag).filter(Boolean))];
-  state.templateFilterTags = activeTags.filter((tag) =>
-    options.some((option) => option.value === tag)
-  );
-
-  templateFilterField.replaceChildren(
-    ...options.map((option) => {
-      const element = document.createElement("button");
-      element.type = "button";
-      element.className = `template-filter-chip${state.templateFilterTags.includes(option.value) ? " active" : ""}`;
-      element.dataset.templateFilterTag = option.value;
-      element.textContent = option.label;
-      element.setAttribute("aria-pressed", state.templateFilterTags.includes(option.value) ? "true" : "false");
-      return element;
-    })
-  );
-  templateFilterField.scrollLeft = previousScrollLeft;
-}
-
-function getTemplateById(templateId) {
-  return CUSTOM_RULE_TEMPLATES.find((template) => template.id === templateId) ?? null;
-}
-
-function getTemplateDraft(templateId) {
-  if (!state.templateDrafts[templateId]) {
-    const template = getTemplateById(templateId);
-    if (!template) return {};
-    state.templateDrafts[templateId] = Object.fromEntries(
-      template.params.map((param) => [param.id, param.defaultValue])
-    );
-  }
-  return state.templateDrafts[templateId];
-}
-
-function buildTemplatePreview(template, draft) {
-  try {
-    return template.buildCode(draft);
-  } catch (error) {
-    console.error(`Failed to build preview for template "${template.id}".`, error);
-    return `// ${t("custom.templatesError")}`;
-  }
-}
-
-function createTemplateCardElement(template) {
-  const draft = getTemplateDraft(template.id);
-  const preview = buildTemplatePreview(template, draft);
-
-  const card = document.createElement("article");
-  card.className = `template-card ${template.id === state.selectedTemplateId ? "selected" : ""}`;
-  card.dataset.templateCard = template.id;
-
-  const title = document.createElement("h4");
-  title.textContent = template.title;
-  card.appendChild(title);
-
-  const copy = document.createElement("p");
-  copy.className = "template-card-copy";
-  copy.textContent = template.description;
-  card.appendChild(copy);
-
-  const paramGrid = document.createElement("div");
-  paramGrid.className = "template-param-grid";
-
-  for (const param of template.params) {
-    const label = document.createElement("label");
-    if (param.span === 2) {
-      label.classList.add("span-2");
-    }
-
-    const labelText = document.createElement("span");
-    labelText.textContent = param.label;
-    label.appendChild(labelText);
-
-    const input = document.createElement("input");
-    input.dataset.templateId = template.id;
-    input.dataset.paramId = param.id;
-
-    if (param.type === "checkbox") {
-      input.type = "checkbox";
-      input.checked = Boolean(draft[param.id]);
-    } else {
-      input.type = param.type;
-      input.value = String(draft[param.id] ?? "");
-      if (param.min !== undefined) input.min = String(param.min);
-      if (param.max !== undefined) input.max = String(param.max);
-      if (param.step !== undefined) input.step = String(param.step);
-    }
-
-    label.appendChild(input);
-    paramGrid.appendChild(label);
-  }
-
-  card.appendChild(paramGrid);
-
-  const pre = document.createElement("pre");
-  const code = document.createElement("code");
-  code.innerHTML = highlightCustomRuleSource(preview);
-  pre.appendChild(code);
-  card.appendChild(pre);
-
-  return card;
-}
-
-function renderTemplateModal() {
-  if (!templateModal || !templateGrid || !templateStatus || !templateApplyButton) {
-    return;
-  }
-
-  if (!state.isTemplateOpen) {
-    templateModal.classList.add("hidden");
-    return;
-  }
-
-  try {
-    const previousScrollTop = templateGrid.scrollTop;
-    renderTemplateFilter();
-
-    const filteredTemplates = getFilteredTemplates();
-    if (!filteredTemplates.some((template) => template.id === state.selectedTemplateId)) {
-      state.selectedTemplateId = filteredTemplates[0]?.id ?? null;
-    }
-
-    if (filteredTemplates.length === 0) {
-      templateGrid.innerHTML = `<div class="empty-state">${escapeHtml(t("custom.templatesNoMatches"))}</div>`;
-    } else {
-      templateGrid.replaceChildren(
-        ...filteredTemplates.map((template) => createTemplateCardElement(template))
-      );
-    }
-    templateGrid.scrollTop = previousScrollTop;
-  } catch (error) {
-    console.error("Failed to render template browser.", error);
-    templateGrid.innerHTML = `<div class="empty-state">${escapeHtml(t("custom.templatesError"))}</div>`;
-    templateStatus.textContent = t("custom.templatesError");
-    templateApplyButton.disabled = true;
-    templateModal.classList.remove("hidden");
-    return;
-  }
-
-  templateStatus.textContent = state.selectedTemplateId
-    ? t("custom.templateSelected", { name: getTemplateById(state.selectedTemplateId)?.title ?? "" })
-    : getFilteredTemplates().length === 0
-      ? t("custom.templatesNoMatches")
-      : t("custom.templatesCopy");
-  templateApplyButton.disabled = !state.selectedTemplateId;
-  templateModal.classList.remove("hidden");
-}
-
-function openTemplateModal() {
-  const group = getSelectedGroup();
-  if (!group || group.groupType !== "custom") {
-    return;
-  }
-
-  state.isTemplateOpen = true;
-  const filteredTemplates = getFilteredTemplates();
-  if (!filteredTemplates.some((template) => template.id === state.selectedTemplateId)) {
-    state.selectedTemplateId = filteredTemplates[0]?.id ?? null;
-  }
-  if (templateModal) {
-    templateModal.classList.remove("hidden");
-  }
-  if (templateStatus) {
-    templateStatus.textContent = t("custom.templatesLoading");
-  }
-  renderTemplateModal();
-}
-
-function closeTemplateModal() {
-  state.isTemplateOpen = false;
-  if (templateModal) {
-    templateModal.classList.add("hidden");
-  }
-}
-
-async function applyTemplatePreset() {
-  const template = getTemplateById(state.selectedTemplateId);
-  const group = getSelectedGroup();
-  if (!template || !group || group.groupType !== "custom" || blockingRulesField.disabled) {
-    return;
-  }
-
-  const nextCode = template.buildCode(getTemplateDraft(template.id));
-  const currentCode = String(blockingRulesField.value ?? "").trim();
-  const shouldReplace =
-    !currentCode ||
-    (await cbDialog.confirm(t("custom.confirmReplaceTemplate"), {
-      danger: true,
-      confirmText: t("modal.confirm"),
-      cancelText: t("modal.cancel")
-    }));
-  if (!shouldReplace) {
-    return;
-  }
-
-  blockingRulesField.value = nextCode;
-  stashCurrentDraft();
-  closeTemplateModal();
-  render();
-  scheduleAutosave();
-  setStatus(t("status.templateApplied", { name: template.title }));
-}
-
 const CUSTOM_RULE_KEYWORDS = new Set([
   "async", "await", "break", "case", "catch", "class", "const", "continue",
   "debugger", "default", "delete", "do", "else", "export", "extends", "finally",
@@ -3538,6 +3082,7 @@ function createDefaultGroup(groupType = DEFAULT_GROUP_TYPE) {
     platformTagDefaultConfidence: 4,
     platformTagBlockUntagged: false,
     platformTagBlockPage: true,
+    platformTagCoverUntilTagged: false,
     platformTagEffect: "dim",
     redditMode: "all",
     redditSubreddits: [],
@@ -3665,6 +3210,7 @@ function sanitizeGroups(groups) {
       platformTagDefaultConfidence: clampTagFilterConfidence(group?.platformTagDefaultConfidence, 4),
       platformTagBlockUntagged: Boolean(group?.platformTagBlockUntagged),
       platformTagBlockPage: group?.platformTagBlockPage !== false,
+      platformTagCoverUntilTagged: group?.platformTagCoverUntilTagged === true,
       platformTagEffect: group?.platformTagEffect === "block" ? "block" : "dim",
       redditSubreddits: [
         ...new Set(rawRedditSubreddits.map(normalizeRedditSubredditInput).filter(Boolean))
@@ -3822,6 +3368,7 @@ function getSerializableGroupSnapshot(group) {
     platformTagDefaultConfidence: clampTagFilterConfidence(group.platformTagDefaultConfidence, 4),
     platformTagBlockUntagged: Boolean(group.platformTagBlockUntagged),
     platformTagBlockPage: group.platformTagBlockPage !== false,
+    platformTagCoverUntilTagged: group.platformTagCoverUntilTagged === true,
     platformTagEffect: group.platformTagEffect === "block" ? "block" : "dim",
     redditMode: group.redditMode,
     redditSubreddits: [...group.redditSubreddits],
@@ -3951,6 +3498,7 @@ function groupToDraft(group) {
     platformTagDefaultConfidence: clampTagFilterConfidence(group.platformTagDefaultConfidence, 4),
     platformTagBlockUntagged: Boolean(group.platformTagBlockUntagged),
     platformTagBlockPage: group.platformTagBlockPage !== false,
+    platformTagCoverUntilTagged: group.platformTagCoverUntilTagged === true,
     platformTagEffect: group.platformTagEffect === "block" ? "block" : "dim",
     redditMode: normalizeRedditMode(group.redditMode, group.redditSubreddits),
     redditSubredditsText: group.redditSubreddits.join("\n"),
@@ -4939,7 +4487,6 @@ function renderEditor(now = Date.now()) {
     setSnoozeWarning("");
     updateBlockingRulesEditor();
     renderBlockedSites();
-    if (connectionGroupSection) connectionGroupSection.classList.add("hidden");
     return;
   }
 
@@ -5018,6 +4565,9 @@ function renderEditor(now = Date.now()) {
   );
   if (platformTagBlockPageField) {
     platformTagBlockPageField.checked = (draft?.platformTagBlockPage ?? group.platformTagBlockPage) !== false;
+  }
+  if (platformTagCoverUntilTaggedField) {
+    platformTagCoverUntilTaggedField.checked = (draft?.platformTagCoverUntilTagged ?? group.platformTagCoverUntilTagged) === true;
   }
   if (platformTagFields) platformTagFields.classList.toggle("hidden", !tagCompatible);
   if (platformTagListBlock) platformTagListBlock.classList.toggle("hidden", tagMode === "all");
@@ -5144,9 +4694,6 @@ function renderEditor(now = Date.now()) {
   fallbackUrlField.disabled = !editable;
   if (groupEffectField) groupEffectField.disabled = !editable;
   skipToNextOnBlockField.disabled = !editable || !isPlatformVideoGroup || !isScrollPlatform;
-  if (openRuleTemplatesButton) {
-    openRuleTemplatesButton.disabled = !editable || !isCustomGroup;
-  }
   if (runCustomGroupButton) {
     runCustomGroupButton.disabled = !editable || !isCustomGroup;
   }
@@ -5179,7 +4726,6 @@ function renderEditor(now = Date.now()) {
   updateUsageSummary(group, draft, now);
   updateFreezeUI(group, now);
   updateSnoozeUI(group, now);
-  renderConnectionGroupPanel(group, freezeStatus);
   renderBridgeMirror(group);
   updateBlockingRulesEditor();
 }
@@ -5190,7 +4736,6 @@ function render(now = Date.now()) {
   updateBulkActionsUI(now);
   renderEditor(now);
   renderUnfreezeModal(now);
-  renderTemplateModal();
   filterLogFeedByGroup();
 }
 
@@ -5313,6 +4858,7 @@ function stashCurrentDraft() {
     platformTagDefaultConfidence: platformTagDefaultConfidenceField.value,
     platformTagBlockUntagged: platformTagBlockUntaggedField.checked,
     platformTagBlockPage: platformTagBlockPageField ? platformTagBlockPageField.checked : true,
+    platformTagCoverUntilTagged: platformTagCoverUntilTaggedField ? platformTagCoverUntilTaggedField.checked : false,
     platformTagEffect: platformTagEffectField.value,
     redditMode: redditModeField.value,
     redditSubredditsText: redditSubredditsField.value,
@@ -5389,7 +4935,6 @@ function selectGroup(groupId) {
   }
 
   closeUnfreezeFlow();
-  closeTemplateModal();
   stashCurrentDraft();
   flushAutosave()
     .catch((error) => {
@@ -5724,7 +5269,6 @@ async function importIntoSelectedGroup() {
     state.usageResetAtMs[group.id] = Date.now();
     delete state.groupSnoozes[group.id];
     state.groupSnoozeTotalsMs[group.id] = 0;
-    closeTemplateModal();
 
     await persistState(t("status.importedGroup", { name: replacementGroup.name }));
     render();
@@ -5868,6 +5412,7 @@ function buildUpdatedGroupFromDraft(group, draft, { strict = true } = {}) {
       platformTagDefaultConfidence: clampTagFilterConfidence(draft.platformTagDefaultConfidence, 4),
       platformTagBlockUntagged: Boolean(draft.platformTagBlockUntagged),
       platformTagBlockPage: draft.platformTagBlockPage !== false,
+      platformTagCoverUntilTagged: draft.platformTagCoverUntilTagged === true,
       platformTagEffect: draft.platformTagEffect === "block" ? "block" : "dim",
       surfaceHides: normalizeSurfaceHides(
         Array.isArray(draft.surfaceHides) ? draft.surfaceHides : group.surfaceHides,
@@ -7195,9 +6740,8 @@ if (runCustomGroupButton) {
 }
 
 // Platforms whose feed-predicate engine can act on content tags (helpers.js
-// PLATFORM_LIST). Others (e.g. reddit, bilibili) would need the predicate
-// engine extended before a tag rule could hide/blackout their cards.
-const CONTENT_TAG_PLATFORMS = new Set(["youtube", "tiktok", "instagram", "facebook", "twitch"]);
+// PLATFORM_LIST): the no-code builder emits `<platform>().dim|hide(...)` for these.
+const CONTENT_TAG_PLATFORMS = new Set(["youtube", "tiktok", "instagram", "facebook", "twitch", "reddit", "bilibili", "twitter"]);
 
 // Turn the no-code builder fields into a custom-rule source. Uses the platform
 // predicate's dim() (thumbnail blackout, correctable) or hide() (remove card).
@@ -7423,84 +6967,6 @@ if (aiPromptCopyButton) {
   });
 }
 
-if (openRuleTemplatesButton) {
-  openRuleTemplatesButton.addEventListener("click", () => {
-    try {
-      openTemplateModal();
-    } catch (error) {
-      console.error("Failed to open custom rule templates.", error);
-      setStatus(t("status.errorApplyTemplate"), true);
-    }
-  });
-}
-
-if (templateFilterField) {
-  templateFilterField.addEventListener("click", (event) => {
-    const chip = event.target.closest("[data-template-filter-tag]");
-    if (!chip) {
-      return;
-    }
-    const tag = normalizeTemplateTag(chip.dataset.templateFilterTag);
-    if (!tag) {
-      return;
-    }
-    const nextTags = new Set(state.templateFilterTags);
-    if (nextTags.has(tag)) {
-      nextTags.delete(tag);
-    } else {
-      nextTags.add(tag);
-    }
-    state.templateFilterTags = [...nextTags];
-    renderTemplateModal();
-  });
-}
-
-if (templateGrid) {
-  templateGrid.addEventListener("click", (event) => {
-    if (event.target.closest("input, label, button, textarea, select")) {
-      return;
-    }
-    const card = event.target.closest("[data-template-card]");
-    if (!card) return;
-    state.selectedTemplateId = card.dataset.templateCard;
-    renderTemplateModal();
-  });
-
-  templateGrid.addEventListener("input", (event) => {
-    const field = event.target.closest("[data-template-id][data-param-id]");
-    if (!field) return;
-    const templateId = field.dataset.templateId;
-    const paramId = field.dataset.paramId;
-    const template = getTemplateById(templateId);
-    if (!template) return;
-    const param = template.params.find((item) => item.id === paramId);
-    if (!param) return;
-    const selectionStart = typeof field.selectionStart === "number" ? field.selectionStart : null;
-    const selectionEnd = typeof field.selectionEnd === "number" ? field.selectionEnd : null;
-    const previousScrollTop = templateGrid.scrollTop;
-    const draft = getTemplateDraft(templateId);
-    draft[paramId] = param.type === "checkbox" ? field.checked : field.value;
-    state.selectedTemplateId = templateId;
-    renderTemplateModal();
-    templateGrid.scrollTop = previousScrollTop;
-    const nextField = templateGrid.querySelector(
-      `[data-template-id="${templateId}"][data-param-id="${paramId}"]`
-    );
-    if (nextField) {
-      if (typeof nextField.focus === "function") {
-        nextField.focus({ preventScroll: true });
-      }
-      if (
-        selectionStart !== null &&
-        typeof nextField.setSelectionRange === "function" &&
-        document.activeElement === nextField
-      ) {
-        nextField.setSelectionRange(selectionStart, selectionEnd ?? selectionStart);
-      }
-    }
-  });
-}
-
 setupPlatformChipInputs();
 
 platformAuthorsField.addEventListener("input", () => {
@@ -7552,7 +7018,7 @@ for (const field of [platformTagsField, platformTagDefaultConfidenceField, platf
     scheduleAutosave();
   });
 }
-for (const field of [platformTagBlockUntaggedField, platformTagBlockPageField]) {
+for (const field of [platformTagBlockUntaggedField, platformTagBlockPageField, platformTagCoverUntilTaggedField]) {
   if (!field) continue;
   field.addEventListener("change", () => {
     stashCurrentDraft();
@@ -7682,10 +7148,6 @@ if (settingsModal) {
 // Global settings auto-save: persist on every committed edit (no Save button).
 {
   const settingsAutoSaveFields = [
-    settingsTickRateField,
-    settingsAutosaveDebounceField,
-    settingsDebugModeField,
-    settingsShowOnPageLogToastsField,
     settingsDefaultSnoozeMinutesField,
     settingsDefaultFallbackUrlField
   ];
@@ -7705,41 +7167,9 @@ if (classifierCollectionToggle) {
     classifierBridgeStorageSet({ ...classifierBridgeSettings, collectionEnabled: classifierCollectionToggle.checked }).catch(() => {});
   });
 }
-
-if (connectionGroupConnectButton) {
-  connectionGroupConnectButton.addEventListener("click", () => {
-    const group = getSelectedGroup();
-    if (!group || !isBridgeEligibleGroup(group)) return;
-    const toProgram = connectionGroupProgram?.value || "";
-    if (!toProgram) return;
-    // The initiator's settings win the first merge for this group.
-    state.pendingPriorityGroups.add(group.id);
-    try {
-      chrome.runtime.sendMessage({
-        type: "group-connect",
-        groupName: group.name,
-        groupType: group.groupType,
-        fromProgram: LOCAL_PROGRAM_ID,
-        toProgram
-      });
-    } catch (_) {}
-    if (connectionGroupHint) connectionGroupHint.textContent = t("connectionGroup.connecting");
-  });
-}
-
-if (connectionGroupDisconnectButton) {
-  connectionGroupDisconnectButton.addEventListener("click", () => {
-    const group = getSelectedGroup();
-    const cluster = group ? groupConnectionCluster(group) : null;
-    if (!cluster) return;
-    try {
-      chrome.runtime.sendMessage({
-        type: "group-disconnect",
-        clusterId: cluster.id,
-        groupName: group.name,
-        program: LOCAL_PROGRAM_ID
-      });
-    } catch (_) {}
+if (classifierTaggingModeField) {
+  classifierTaggingModeField.addEventListener("change", () => {
+    classifierBridgeStorageSet({ ...classifierBridgeSettings, taggingMode: classifierTaggingModeField.value }).catch(() => {});
   });
 }
 
@@ -7853,34 +7283,11 @@ manualCloseButton.addEventListener("click", () => {
   closeManual();
 });
 
-if (templateCloseButton) {
-  templateCloseButton.addEventListener("click", () => {
-    closeTemplateModal();
-  });
-}
-
-if (templateApplyButton) {
-  templateApplyButton.addEventListener("click", () => {
-    applyTemplatePreset().catch((error) => {
-      console.error("Failed to apply custom rule template.", error);
-      setStatus(t("status.errorApplyTemplate"), true);
-    });
-  });
-}
-
 manualModal.addEventListener("click", (event) => {
   if (event.target === manualModal) {
     closeManual();
   }
 });
-
-if (templateModal) {
-  templateModal.addEventListener("click", (event) => {
-    if (event.target === templateModal) {
-      closeTemplateModal();
-    }
-  });
-}
 
 confirmProceedButton.addEventListener("click", () => {
   const confirmationKind = state.unfreezeFlow?.kind;
@@ -7913,8 +7320,6 @@ window.addEventListener("keydown", (event) => {
       closeSettings();
     } else if (state.isManualOpen) {
       closeManual();
-    } else if (state.isTemplateOpen) {
-      closeTemplateModal();
     } else if (state.unfreezeFlow) {
       closeUnfreezeFlow();
     }
@@ -8075,9 +7480,6 @@ if (chrome.runtime && chrome.runtime.onMessage) {
     if (message.type === "clusters-push") {
       applyClusters(message.clusters);
       return;
-    }
-    if (message.type === "group-rejected") {
-      applyGroupRejection(message.reason);
     }
   });
 }
