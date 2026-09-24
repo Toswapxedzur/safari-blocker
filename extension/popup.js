@@ -1,6 +1,7 @@
 const BLOCKED_GROUPS_KEY = "blockedGroups";
 const USAGE_TIMERS_KEY = "usageTimersMs";
 const USAGE_RESET_AT_KEY = "usageResetAtMs";
+const USAGE_BUCKETS_KEY = "usageBucketsMs";
 const GROUP_SNOOZES_KEY = "groupSnoozes";
 const GROUP_SNOOZE_TOTALS_KEY = "groupSnoozeTotalsMs";
 const GLOBAL_SETTINGS_KEY = "globalSettings";
@@ -190,8 +191,7 @@ const DEFAULT_GLOBAL_SETTINGS = {
   // The user-facing helpers.log() output continues to flow regardless.
   debugMode: false,
   showOnPageLogToasts: true,
-  defaultSnoozeMinutes: 30,
-  defaultFallbackUrl: "about:blank"
+  defaultSnoozeMinutes: 30
 };
 const TICK_RATE_MIN_MS = 250;
 const TICK_RATE_MAX_MS = 60_000;
@@ -278,6 +278,8 @@ const timedSettings = document.getElementById("timedSettings");
 const allowedMinutesRow = document.getElementById("allowedMinutesRow");
 const allowedMinutesField = document.getElementById("allowedMinutes");
 const resetIntervalHoursField = document.getElementById("resetIntervalHours");
+const resetAtMidnightField = document.getElementById("resetAtMidnight");
+const rollingLimitField = document.getElementById("rollingLimit");
 const usageSummary = document.getElementById("usageSummary");
 const scheduleSection = document.getElementById("scheduleSection");
 const daysGrid = document.getElementById("daysGrid");
@@ -319,8 +321,6 @@ const platformTagBlockUntaggedField = document.getElementById("platformTagBlockU
 const platformTagBlockPageField = document.getElementById("platformTagBlockPage");
 const platformTagCoverUntilTaggedField = document.getElementById("platformTagCoverUntilTagged");
 const platformBlockHomePageField = document.getElementById("platformBlockHomePage");
-const skipToNextOnBlockRow = document.getElementById("skipToNextOnBlockRow");
-const skipToNextOnBlockField = document.getElementById("skipToNextOnBlock");
 const redditSettingsCard = document.getElementById("redditFields");
 const redditModeField = document.getElementById("redditMode");
 const redditSubredditsField = document.getElementById("redditSubreddits");
@@ -371,16 +371,6 @@ const runCustomGroupButton = document.getElementById("runCustomGroupButton");
 const checkSyntaxButton = document.getElementById("checkSyntaxButton");
 const runCustomGroupStatus = document.getElementById("runCustomGroupStatus");
 // No-code content-tag rule builder (inside the custom editor).
-const contentTagBuilder = document.getElementById("contentTagBuilder");
-const contentTagPlatformField = document.getElementById("contentTagPlatform");
-const contentTagModeField = document.getElementById("contentTagMode");
-const contentTagNamesField = document.getElementById("contentTagNames");
-const contentTagConfidenceField = document.getElementById("contentTagConfidence");
-const contentTagEffectField = document.getElementById("contentTagEffect");
-const contentTagBlockUntaggedRow = document.getElementById("contentTagBlockUntaggedRow");
-const contentTagBlockUntaggedField = document.getElementById("contentTagBlockUntagged");
-const contentTagApplyButton = document.getElementById("contentTagApplyButton");
-const contentTagStatus = document.getElementById("contentTagStatus");
 const aiPromptPanel = document.getElementById("aiPromptPanel");
 const aiPromptInput = document.getElementById("aiPromptInput");
 const aiPromptCopyButton = document.getElementById("aiPromptCopyButton");
@@ -401,7 +391,6 @@ const settingsButton = document.getElementById("settingsButton");
 const settingsModal = document.getElementById("settingsModal");
 const settingsCloseButton = document.getElementById("settingsCloseButton");
 const settingsDefaultSnoozeMinutesField = document.getElementById("settingsDefaultSnoozeMinutes");
-const settingsDefaultFallbackUrlField = document.getElementById("settingsDefaultFallbackUrl");
 const localFolderChooseButton = document.getElementById("localFolderChooseButton");
 const localFolderRevokeButton = document.getElementById("localFolderRevokeButton");
 const localFolderStatus = document.getElementById("localFolderStatus");
@@ -416,6 +405,7 @@ const state = {
   groups: [],
   usageTimersMs: {},
   usageResetAtMs: {},
+  usageBucketsMs: {},
   groupSnoozes: {},
   groupSnoozeTotalsMs: {},
   globalSettings: { ...DEFAULT_GLOBAL_SETTINGS },
@@ -1143,6 +1133,8 @@ const SYNC_SCALAR_FIELDS = [
   "mode",
   "allowedMinutes",
   "resetIntervalHours",
+  "resetAtMidnight",
+  "rollingLimit",
   "allowSnooze",
   "snoozeMinutes",
   "snoozeActivationDelayMinutes",
@@ -1156,8 +1148,7 @@ const SYNC_SCALAR_FIELDS = [
   "frozenAtMs",
   "blockHomePage",
   "allowlist",
-  "fallbackUrl",
-  "skipToNextOnBlock"
+  "fallbackUrl"
 ];
 
 // This endpoint owns (can edit + contributes) one blocked-list type: the Mac
@@ -1249,7 +1240,7 @@ function applyClusterShared(group, shared) {
   // elapsed timer (display + enforcement) reflects time spent on every member.
   // We never overwrite our own future accrual — the background keeps adding to
   // this value and reporting it back, and the hub measures only the new delta.
-  if (next.groupType === "site" && Number.isFinite(shared.usageMs)) {
+  if (next.groupType === "site" && !next.rollingLimit && Number.isFinite(shared.usageMs)) {
     const incomingUsage = Math.max(0, Number(shared.usageMs) || 0);
     if ((Number(state.usageTimersMs[group.id]) || 0) !== incomingUsage) {
       state.usageTimersMs[group.id] = incomingUsage;
@@ -1320,7 +1311,6 @@ function syncAllClusters() {
 function syncSettingsFormFromState() {
   const s = state.globalSettings || DEFAULT_GLOBAL_SETTINGS;
   if (settingsDefaultSnoozeMinutesField) settingsDefaultSnoozeMinutesField.value = String(s.defaultSnoozeMinutes);
-  if (settingsDefaultFallbackUrlField) settingsDefaultFallbackUrlField.value = s.defaultFallbackUrl ?? "";
   if (settingsStatus) settingsStatus.textContent = "";
 }
 
@@ -1350,8 +1340,7 @@ async function saveSettingsFromForm() {
     autosaveDebounceMs: state.globalSettings?.autosaveDebounceMs,
     debugMode: state.globalSettings?.debugMode,
     showOnPageLogToasts: state.globalSettings?.showOnPageLogToasts,
-    defaultSnoozeMinutes: settingsDefaultSnoozeMinutesField?.value,
-    defaultFallbackUrl: settingsDefaultFallbackUrlField?.value
+    defaultSnoozeMinutes: settingsDefaultSnoozeMinutesField?.value
   };
   const sanitized = sanitizeGlobalSettings(draft);
   state.globalSettings = sanitized;
@@ -2007,8 +1996,6 @@ function sanitizeGlobalSettings(raw) {
     const parsed = Number.parseFloat(src.defaultSnoozeMinutes);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_GLOBAL_SETTINGS.defaultSnoozeMinutes;
   })();
-  const defaultFallbackUrl =
-    typeof src.defaultFallbackUrl === "string" ? src.defaultFallbackUrl.trim() : "";
   // Migrate the old `showDebugOverlay` key (which defaulted to true)
   // to the new `debugMode` key (which defaults to false). If the user
   // had previously SET showDebugOverlay we honor it; otherwise we
@@ -2022,8 +2009,7 @@ function sanitizeGlobalSettings(raw) {
     autosaveDebounceMs,
     debugMode,
     showOnPageLogToasts,
-    defaultSnoozeMinutes,
-    defaultFallbackUrl
+    defaultSnoozeMinutes
   };
   return out;
 }
@@ -2048,7 +2034,7 @@ function normalizeTimeWindowLine(line) {
     endHours > 23 ||
     startMinutes > 59 ||
     endMinutes > 59 ||
-    startTotalMinutes >= endTotalMinutes
+    startTotalMinutes === endTotalMinutes
   ) {
     return null;
   }
@@ -3064,6 +3050,8 @@ function createDefaultGroup(groupType = DEFAULT_GROUP_TYPE) {
     mode: "instant",
     allowedMinutes: DEFAULT_ALLOWED_MINUTES,
     resetIntervalHours: DEFAULT_RESET_INTERVAL_HOURS,
+    resetAtMidnight: false,
+    rollingLimit: false,
     allowSnooze: true,
     // Seed snooze knobs from the global default so the user doesn't redo
     // them per-group. Custom groups don't expose these in the editor but
@@ -3103,8 +3091,7 @@ function createDefaultGroup(groupType = DEFAULT_GROUP_TYPE) {
     allowlist: false,
     blockHomePage: false,
     effect: "block",
-    fallbackUrl: state.globalSettings?.defaultFallbackUrl ?? "",
-    skipToNextOnBlock: false
+    fallbackUrl: ""
   };
 }
 
@@ -3181,6 +3168,8 @@ function sanitizeGroups(groups) {
       resetIntervalHours:
         parseResetIntervalHours(group?.resetIntervalHours) ??
         DEFAULT_RESET_INTERVAL_HOURS,
+      resetAtMidnight: group?.resetAtMidnight === true,
+      rollingLimit: group?.rollingLimit === true,
       allowSnooze: group?.allowSnooze !== false,
       snoozeMinutes:
         parseSnoozeMinutes(group?.snoozeMinutes) ?? DEFAULT_SNOOZE_MINUTES,
@@ -3262,8 +3251,7 @@ function sanitizeGroups(groups) {
       allowlist: ownsSiteList && Boolean(group?.allowlist),
       blockHomePage: Boolean(group?.blockHomePage),
       effect: group?.effect === "allow" ? "allow" : "block",
-      fallbackUrl: typeof group?.fallbackUrl === "string" ? group.fallbackUrl.trim() : "",
-      skipToNextOnBlock: Boolean(group?.skipToNextOnBlock)
+      fallbackUrl: typeof group?.fallbackUrl === "string" ? group.fallbackUrl.trim() : ""
     };
   });
 
@@ -3352,6 +3340,8 @@ function getSerializableGroupSnapshot(group) {
     mode: group.mode,
     allowedMinutes: group.allowedMinutes,
     resetIntervalHours: group.resetIntervalHours,
+    resetAtMidnight: group.resetAtMidnight === true,
+    rollingLimit: group.rollingLimit === true,
     allowSnooze: group.allowSnooze !== false,
     snoozeMinutes: group.snoozeMinutes,
     snoozeActivationDelayMinutes:
@@ -3386,8 +3376,7 @@ function getSerializableGroupSnapshot(group) {
     allowlist: Boolean(group.allowlist),
     blockHomePage: Boolean(group.blockHomePage),
     effect: group.effect === "allow" ? "allow" : "block",
-    fallbackUrl: group.fallbackUrl ?? "",
-    skipToNextOnBlock: Boolean(group.skipToNextOnBlock)
+    fallbackUrl: group.fallbackUrl ?? ""
   };
 }
 
@@ -3480,6 +3469,8 @@ function groupToDraft(group) {
     mode: group.mode,
     allowedMinutes: String(group.allowedMinutes),
     resetIntervalHours: String(group.resetIntervalHours),
+    resetAtMidnight: group.resetAtMidnight === true,
+    rollingLimit: group.rollingLimit === true,
     allowSnooze: group.allowSnooze !== false,
     snoozeMinutes: String(group.snoozeMinutes),
     snoozeActivationDelayMinutes: String(
@@ -3510,7 +3501,6 @@ function groupToDraft(group) {
     allowlist: Boolean(group.allowlist),
     effect: group.effect === "allow" ? "allow" : "block",
     fallbackUrl: group.fallbackUrl ?? "",
-    skipToNextOnBlock: Boolean(group.skipToNextOnBlock),
     freezeModeChoice: normalizeFreezeModeChoice(group)
   };
 }
@@ -3545,40 +3535,98 @@ function getDraftForGroup(groupId) {
   return group ? state.drafts[groupId] ?? groupToDraft(group) : null;
 }
 
+function getResetIntervalMs(group) {
+  return group.resetIntervalHours * MS_PER_HOUR;
+}
+
+// Timed-group budget periods — kept identical to background.js (parity-tested).
+const USAGE_BUCKET_MS = MS_PER_MINUTE;
+
+function cbStartOfDayMs(nowMs) {
+  const day = new Date(nowMs);
+  day.setHours(0, 0, 0, 0);
+  return day.getTime();
+}
+
+function cbNextMidnightMs(nowMs) {
+  const day = new Date(cbStartOfDayMs(nowMs));
+  day.setDate(day.getDate() + 1);
+  return day.getTime();
+}
+
+function cbPeriodStartMs(anchorMs, group, nowMs) {
+  const interval = Math.max(0, getResetIntervalMs(group));
+  if (group.resetAtMidnight) {
+    const dayStart = cbStartOfDayMs(nowMs);
+    if (interval <= 0) return dayStart;
+    return dayStart + Math.floor((nowMs - dayStart) / interval) * interval;
+  }
+  if (interval <= 0 || nowMs - anchorMs < interval) return anchorMs;
+  return anchorMs + Math.floor((nowMs - anchorMs) / interval) * interval;
+}
+
+function cbNextResetMs(periodStartMs, group, nowMs) {
+  const interval = Math.max(0, getResetIntervalMs(group));
+  if (group.resetAtMidnight) {
+    const midnight = cbNextMidnightMs(nowMs);
+    return interval > 0 ? Math.min(periodStartMs + interval, midnight) : midnight;
+  }
+  return interval > 0 ? periodStartMs + interval : null;
+}
+
+function cbUsageBucketStartMs(nowMs) {
+  return Math.floor(nowMs / USAGE_BUCKET_MS) * USAGE_BUCKET_MS;
+}
+
+function cbPruneUsageBuckets(buckets, group, nowMs) {
+  let windowStart = nowMs - Math.max(0, getResetIntervalMs(group));
+  if (group.resetAtMidnight) windowStart = Math.max(windowStart, cbStartOfDayMs(nowMs));
+  const kept = {};
+  for (const [minute, used] of Object.entries(buckets ?? {})) {
+    const start = Number(minute);
+    const ms = Number(used);
+    // A minute counts until the whole minute has aged out of the window.
+    if (Number.isFinite(start) && Number.isFinite(ms) && ms > 0 && start + USAGE_BUCKET_MS > windowStart) {
+      kept[String(start)] = ms;
+    }
+  }
+  return kept;
+}
+
+function cbBucketsUsedMs(buckets) {
+  return Object.values(buckets ?? {}).reduce((sum, used) => sum + (Number(used) || 0), 0);
+}
+
+// When rolling time starts coming back: the oldest counted minute leaving the
+// window (or midnight clearing it). Null when nothing is counted.
+function cbNextReturnMs(buckets, group, nowMs) {
+  const minutes = Object.keys(buckets ?? {}).map(Number).filter(Number.isFinite);
+  if (minutes.length === 0) return null;
+  let next = Math.min(...minutes) + USAGE_BUCKET_MS + Math.max(0, getResetIntervalMs(group));
+  if (group.resetAtMidnight) next = Math.min(next, cbNextMidnightMs(nowMs));
+  return next;
+}
+
 function getDisplayUsageState(group, now = Date.now()) {
   const storedUsedMs = state.usageTimersMs[group.id] ?? 0;
   const storedResetAtMs = state.usageResetAtMs[group.id] ?? now;
 
   if (!isTimedBlockingMode(group.mode)) {
+    return { usedMs: storedUsedMs, nextResetAtMs: null };
+  }
+
+  if (group.rollingLimit) {
+    const buckets = cbPruneUsageBuckets(state.usageBucketsMs[group.id], group, now);
     return {
-      usedMs: storedUsedMs,
-      nextResetAtMs: storedResetAtMs
+      usedMs: cbBucketsUsedMs(buckets),
+      nextResetAtMs: cbNextReturnMs(buckets, group, now)
     };
   }
 
-  const intervalMs = group.resetIntervalHours * MS_PER_HOUR;
-
-  if (intervalMs <= 0) {
-    return {
-      usedMs: storedUsedMs,
-      nextResetAtMs: storedResetAtMs
-    };
-  }
-
-  const elapsedSinceReset = now - storedResetAtMs;
-
-  if (elapsedSinceReset < intervalMs) {
-    return {
-      usedMs: storedUsedMs,
-      nextResetAtMs: storedResetAtMs + intervalMs
-    };
-  }
-
-  const elapsedIntervals = Math.floor(elapsedSinceReset / intervalMs);
-
+  const periodStartMs = cbPeriodStartMs(storedResetAtMs, group, now);
   return {
-    usedMs: 0,
-    nextResetAtMs: storedResetAtMs + (elapsedIntervals + 1) * intervalMs
+    usedMs: periodStartMs === storedResetAtMs ? storedUsedMs : 0,
+    nextResetAtMs: cbNextResetMs(periodStartMs, group, now)
   };
 }
 
@@ -3967,7 +4015,9 @@ function getEffectiveGroup(group, draft) {
     ...group,
     mode,
     allowedMinutes,
-    resetIntervalHours
+    resetIntervalHours,
+    resetAtMidnight: draft?.resetAtMidnight ?? group.resetAtMidnight === true,
+    rollingLimit: draft?.rollingLimit ?? group.rollingLimit === true
   };
 }
 
@@ -4204,6 +4254,19 @@ function renderGroupList(now = Date.now()) {
   }
 }
 
+function formatResetClock(ms, now) {
+  const at = new Date(ms);
+  const sameDay = cbStartOfDayMs(ms) === cbStartOfDayMs(now);
+  const options = sameDay
+    ? { hour: "numeric", minute: "2-digit" }
+    : { weekday: "short", hour: "numeric", minute: "2-digit" };
+  try {
+    return at.toLocaleString(state.language || undefined, options);
+  } catch (_) {
+    return at.toLocaleString(undefined, options);
+  }
+}
+
 function updateUsageSummary(group, draft, now = Date.now()) {
   const mode = normalizeBlockingMode(draft?.mode ?? group?.mode);
   if (!group || !draft || !isTimedBlockingMode(mode)) {
@@ -4213,22 +4276,31 @@ function updateUsageSummary(group, draft, now = Date.now()) {
 
   const displayGroup = getEffectiveGroup(group, draft);
   const usageState = getDisplayUsageState(displayGroup, now);
-  if (mode === "timer") {
-    // Count-up stopwatch: show elapsed time used this window.
-    usageSummary.textContent = t("timed.summaryTimer", {
-      time: formatDurationMs(usageState.usedMs),
-      hours: formatHours(displayGroup.resetIntervalHours),
-      suffix: displayGroup.resetIntervalHours === 1 ? "" : "s"
-    });
-    return;
-  }
-
-  const remainingMs = Math.max(displayGroup.allowedMinutes * MS_PER_MINUTE - usageState.usedMs, 0);
-  usageSummary.textContent = t("timed.summary", {
-    time: formatDurationMs(remainingMs),
+  const rolling = displayGroup.rollingLimit === true;
+  const vars = {
     hours: formatHours(displayGroup.resetIntervalHours),
     suffix: displayGroup.resetIntervalHours === 1 ? "" : "s"
-  });
+  };
+  let text;
+  if (mode === "timer") {
+    // Count-up stopwatch: show elapsed time used this window.
+    text = t(rolling ? "timed.summaryTimerRolling" : "timed.summaryTimer", {
+      ...vars,
+      time: formatDurationMs(usageState.usedMs)
+    });
+  } else {
+    const remainingMs = Math.max(displayGroup.allowedMinutes * MS_PER_MINUTE - usageState.usedMs, 0);
+    text = t(rolling ? "timed.summaryRolling" : "timed.summary", {
+      ...vars,
+      time: formatDurationMs(remainingMs)
+    });
+  }
+  if (Number.isFinite(usageState.nextResetAtMs)) {
+    text += " " + t(rolling ? "timed.nextReturn" : "timed.nextReset", {
+      time: formatResetClock(usageState.nextResetAtMs, now)
+    });
+  }
+  usageSummary.textContent = text;
 }
 
 function updateFreezeUI(group, now = Date.now()) {
@@ -4393,6 +4465,8 @@ function renderEditor(now = Date.now()) {
     blockModeField.value = "instant";
     allowedMinutesField.value = "";
     resetIntervalHoursField.value = "";
+    resetAtMidnightField.checked = false;
+    rollingLimitField.checked = false;
     snoozeMinutesField.value = "";
     snoozeActivationDelayField.value = "";
     snoozeCooldownField.value = "";
@@ -4419,8 +4493,6 @@ function renderEditor(now = Date.now()) {
     fallbackUrlField.value = "";
     if (groupEffectField) groupEffectField.value = "block";
     if (groupEffectSection) groupEffectSection.classList.add("hidden");
-    skipToNextOnBlockField.checked = false;
-    skipToNextOnBlockRow.classList.add("hidden");
     blockModeSection.classList.remove("hidden");
     timedSettings.classList.add("hidden");
     customSettingsCard.classList.add("hidden");
@@ -4441,6 +4513,8 @@ function renderEditor(now = Date.now()) {
     blockModeField.disabled = true;
     allowedMinutesField.disabled = true;
     resetIntervalHoursField.disabled = true;
+    resetAtMidnightField.disabled = true;
+    rollingLimitField.disabled = true;
     snoozeMinutesField.disabled = true;
     snoozeActivationDelayField.disabled = true;
     snoozeCooldownField.disabled = true;
@@ -4466,7 +4540,6 @@ function renderEditor(now = Date.now()) {
     redditBlockHomePageField.disabled = true;
     discordBlockHomePageField.disabled = true;
     fallbackUrlField.disabled = true;
-    skipToNextOnBlockField.disabled = true;
     state.aiPromptGroupId = null;
     if (aiPromptPanel) {
       aiPromptPanel.classList.add("hidden");
@@ -4532,6 +4605,8 @@ function renderEditor(now = Date.now()) {
   allowedMinutesField.value = draft?.allowedMinutes ?? String(group.allowedMinutes);
   resetIntervalHoursField.value =
     draft?.resetIntervalHours ?? String(group.resetIntervalHours);
+  resetAtMidnightField.checked = draft?.resetAtMidnight ?? group.resetAtMidnight === true;
+  rollingLimitField.checked = draft?.rollingLimit ?? group.rollingLimit === true;
   allowSnoozeField.checked = draft?.allowSnooze ?? (group.allowSnooze !== false);
   snoozeMinutesField.value = draft?.snoozeMinutes ?? String(group.snoozeMinutes);
   snoozeActivationDelayField.value =
@@ -4603,9 +4678,6 @@ function renderEditor(now = Date.now()) {
   }
   groupEffectField.value = (draft?.effect ?? group.effect) === "allow" ? "allow" : "block";
 
-  const isScrollPlatform = ["youtube", "tiktok", "instagram"].includes(group.groupType);
-  skipToNextOnBlockRow.classList.toggle("hidden", !isPlatformVideoGroup || !isScrollPlatform);
-  skipToNextOnBlockField.checked = Boolean(draft?.skipToNextOnBlock ?? group.skipToNextOnBlock);
 
   freezeModeField.value = freezeStatus.isFrozen
     ? freezeStatus.isParental
@@ -4650,6 +4722,8 @@ function renderEditor(now = Date.now()) {
   blockModeField.disabled = !editable || isCustomGroup;
   allowedMinutesField.disabled = !editable || !isTimedMode || selectedMode === "timer" || isCustomGroup;
   resetIntervalHoursField.disabled = !editable || !isTimedMode || isCustomGroup;
+  resetAtMidnightField.disabled = !editable || !isTimedMode || isCustomGroup;
+  rollingLimitField.disabled = !editable || !isTimedMode || isCustomGroup;
   snoozeMinutesField.disabled = !editable || !allowSnoozeField.checked || freezeStatus.isFrozen;
   snoozeActivationDelayField.disabled = !editable || !allowSnoozeField.checked || freezeStatus.isFrozen;
   snoozeCooldownField.disabled = !editable || !allowSnoozeField.checked || freezeStatus.isFrozen;
@@ -4693,7 +4767,6 @@ function renderEditor(now = Date.now()) {
   discordBlockHomePageField.disabled = !editable || !isDiscordGroup;
   fallbackUrlField.disabled = !editable;
   if (groupEffectField) groupEffectField.disabled = !editable;
-  skipToNextOnBlockField.disabled = !editable || !isPlatformVideoGroup || !isScrollPlatform;
   if (runCustomGroupButton) {
     runCustomGroupButton.disabled = !editable || !isCustomGroup;
   }
@@ -4840,6 +4913,8 @@ function stashCurrentDraft() {
     mode: blockModeField.value,
     allowedMinutes: allowedMinutesField.value,
     resetIntervalHours: resetIntervalHoursField.value,
+    resetAtMidnight: resetAtMidnightField.checked,
+    rollingLimit: rollingLimitField.checked,
     allowSnooze: allowSnoozeField.checked,
     snoozeMinutes: snoozeMinutesField.value,
     snoozeActivationDelayMinutes: snoozeActivationDelayField.value,
@@ -4873,8 +4948,7 @@ function stashCurrentDraft() {
           : false,
     surfaceHides: readSurfaceHidesFromForm(),
     effect: groupEffectField.value === "allow" ? "allow" : "block",
-    fallbackUrl: fallbackUrlField.value,
-    skipToNextOnBlock: skipToNextOnBlockField.checked
+    fallbackUrl: fallbackUrlField.value
   };
 }
 
@@ -4923,6 +4997,7 @@ function flushAutosaveOnExit() {
       [BLOCKED_GROUPS_KEY]: state.groups,
       [USAGE_TIMERS_KEY]: state.usageTimersMs,
       [USAGE_RESET_AT_KEY]: state.usageResetAtMs,
+      [USAGE_BUCKETS_KEY]: state.usageBucketsMs,
       [GROUP_SNOOZES_KEY]: state.groupSnoozes,
       [GROUP_SNOOZE_TOTALS_KEY]: state.groupSnoozeTotalsMs
     });
@@ -4947,11 +5022,28 @@ function selectGroup(groupId) {
     });
 }
 
+function sanitizeUsageBuckets(value, groups) {
+  const sanitized = {};
+  for (const group of groups) {
+    const raw = value?.[group.id];
+    if (!raw || typeof raw !== "object") continue;
+    const buckets = {};
+    for (const [minute, used] of Object.entries(raw)) {
+      const start = Number(minute);
+      const ms = Number(used);
+      if (Number.isFinite(start) && Number.isFinite(ms) && ms > 0) buckets[String(start)] = ms;
+    }
+    sanitized[group.id] = buckets;
+  }
+  return sanitized;
+}
+
 async function loadStoredState() {
   const result = await chrome.storage.local.get({
     [BLOCKED_GROUPS_KEY]: [],
     [USAGE_TIMERS_KEY]: {},
     [USAGE_RESET_AT_KEY]: {},
+    [USAGE_BUCKETS_KEY]: {},
     [GROUP_SNOOZES_KEY]: {},
     [GROUP_SNOOZE_TOTALS_KEY]: {},
     [GLOBAL_SETTINGS_KEY]: { ...DEFAULT_GLOBAL_SETTINGS }
@@ -4965,6 +5057,7 @@ async function loadStoredState() {
     groups,
     usageTimersMs: sanitizeUsageTimers(result[USAGE_TIMERS_KEY], groups),
     usageResetAtMs: sanitizeResetTimes(result[USAGE_RESET_AT_KEY], groups),
+    usageBucketsMs: sanitizeUsageBuckets(result[USAGE_BUCKETS_KEY], groups),
     groupSnoozes: sanitizeSnoozes(result[GROUP_SNOOZES_KEY], groups),
     groupSnoozeTotalsMs: sanitizeSnoozeTotals(result[GROUP_SNOOZE_TOTALS_KEY], groups),
     globalSettings: settings
@@ -4978,6 +5071,7 @@ async function persistState(message) {
     [BLOCKED_GROUPS_KEY]: state.groups,
     [USAGE_TIMERS_KEY]: state.usageTimersMs,
     [USAGE_RESET_AT_KEY]: state.usageResetAtMs,
+    [USAGE_BUCKETS_KEY]: state.usageBucketsMs,
     [GROUP_SNOOZES_KEY]: state.groupSnoozes,
     [GROUP_SNOOZE_TOTALS_KEY]: state.groupSnoozeTotalsMs
   });
@@ -4997,6 +5091,7 @@ async function loadGroups() {
   state.groups = loaded.groups;
   state.usageTimersMs = loaded.usageTimersMs;
   state.usageResetAtMs = loaded.usageResetAtMs;
+  state.usageBucketsMs = loaded.usageBucketsMs;
   state.groupSnoozes = loaded.groupSnoozes;
   state.groupSnoozeTotalsMs = loaded.groupSnoozeTotalsMs;
   state.globalSettings = loaded.globalSettings;
@@ -5064,8 +5159,7 @@ function resetPlatformCriteriaFor(group, groupType) {
     discordMode: defaults.discordMode,
     discordTargets: defaults.discordTargets,
     surfaceHides: defaults.surfaceHides,
-    blockHomePage: defaults.blockHomePage,
-    skipToNextOnBlock: defaults.skipToNextOnBlock
+    blockHomePage: defaults.blockHomePage
   };
 }
 
@@ -5153,6 +5247,7 @@ async function deleteAllGroups() {
   state.drafts = {};
   state.usageTimersMs = {};
   state.usageResetAtMs = {};
+  state.usageBucketsMs = {};
   state.groupSnoozes = {};
   state.groupSnoozeTotalsMs = {};
   state.selectedGroupId = null;
@@ -5179,6 +5274,7 @@ async function deleteSelectedGroup() {
   delete state.drafts[group.id];
   delete state.usageTimersMs[group.id];
   delete state.usageResetAtMs[group.id];
+  delete state.usageBucketsMs[group.id];
   delete state.groupSnoozes[group.id];
   delete state.groupSnoozeTotalsMs[group.id];
   state.selectedGroupId = state.groups[0]?.id ?? null;
@@ -5267,6 +5363,7 @@ async function importIntoSelectedGroup() {
     state.drafts[group.id] = groupToDraft(replacementGroup);
     state.usageTimersMs[group.id] = 0;
     state.usageResetAtMs[group.id] = Date.now();
+    delete state.usageBucketsMs[group.id];
     delete state.groupSnoozes[group.id];
     state.groupSnoozeTotalsMs[group.id] = 0;
 
@@ -5311,6 +5408,8 @@ function buildUpdatedGroupFromDraft(group, draft, { strict = true } = {}) {
   const mode = normalizeBlockingMode(draft.mode);
   const allowedMinutes = parseAllowedMinutes(draft.allowedMinutes);
   const resetIntervalHours = parseResetIntervalHours(draft.resetIntervalHours);
+  const resetAtMidnight = draft.resetAtMidnight === true;
+  const rollingLimit = draft.rollingLimit === true;
   const allowSnooze = Boolean(draft.allowSnooze);
   const snoozeMinutes = parseSnoozeMinutes(draft.snoozeMinutes);
   const snoozeActivationDelayMinutes = parseSnoozeDelayMinutes(draft.snoozeActivationDelayMinutes);
@@ -5386,6 +5485,8 @@ function buildUpdatedGroupFromDraft(group, draft, { strict = true } = {}) {
       resetIntervalHours: isCustomGroup
         ? group.resetIntervalHours
         : resetIntervalHours ?? group.resetIntervalHours,
+      resetAtMidnight: isCustomGroup ? group.resetAtMidnight === true : resetAtMidnight,
+      rollingLimit: isCustomGroup ? group.rollingLimit === true : rollingLimit,
       allowSnooze,
       snoozeMinutes: snoozeMinutes ?? group.snoozeMinutes,
       snoozeActivationDelayMinutes:
@@ -5443,7 +5544,6 @@ function buildUpdatedGroupFromDraft(group, draft, { strict = true } = {}) {
         : typeof draft.fallbackUrl === "string"
         ? draft.fallbackUrl.trim()
         : "",
-      skipToNextOnBlock: Boolean(draft.skipToNextOnBlock),
       freezeModeChoice: normalizeFreezeModeChoice({
         freezeModeChoice: draft.freezeModeChoice,
         freezeMode: group.freezeMode,
@@ -5453,7 +5553,10 @@ function buildUpdatedGroupFromDraft(group, draft, { strict = true } = {}) {
     modeChanged: nextMode !== group.mode,
     resetIntervalChanged:
       isTimedBlockingMode(nextMode) &&
-      (resetIntervalHours ?? group.resetIntervalHours) !== group.resetIntervalHours,
+      !isCustomGroup &&
+      ((resetIntervalHours ?? group.resetIntervalHours) !== group.resetIntervalHours ||
+        resetAtMidnight !== (group.resetAtMidnight === true) ||
+        rollingLimit !== (group.rollingLimit === true)),
     validationError: firstError
   };
 }
@@ -5488,6 +5591,7 @@ async function autosaveSelectedGroup() {
         ) {
           state.usageResetAtMs[group.id] = Date.now();
           state.usageTimersMs[group.id] = 0;
+          delete state.usageBucketsMs[group.id];
         }
       }
     } catch (error) {
@@ -6045,6 +6149,7 @@ async function handleUnfreezeConfirm() {
       state.drafts = {};
       state.usageTimersMs = {};
       state.usageResetAtMs = {};
+      state.usageBucketsMs = {};
       state.groupSnoozes = {};
       state.groupSnoozeTotalsMs = {};
       state.selectedGroupId = null;
@@ -6386,6 +6491,11 @@ function syncExternalState(changes) {
     shouldRenderDynamicOnly = true;
   }
 
+  if (changes[USAGE_BUCKETS_KEY]) {
+    state.usageBucketsMs = sanitizeUsageBuckets(changes[USAGE_BUCKETS_KEY].newValue, state.groups);
+    shouldRenderDynamicOnly = true;
+  }
+
   if (changes[GROUP_SNOOZES_KEY]) {
     state.groupSnoozes = sanitizeSnoozes(changes[GROUP_SNOOZES_KEY].newValue, state.groups);
     shouldRenderDynamicOnly = true;
@@ -6459,6 +6569,14 @@ resetIntervalHoursField.addEventListener("input", () => {
   updateUsageSummary(getSelectedGroup(), getDraftForGroup(state.selectedGroupId));
   scheduleAutosave();
 });
+
+for (const field of [resetAtMidnightField, rollingLimitField]) {
+  field.addEventListener("change", () => {
+    stashCurrentDraft();
+    updateUsageSummary(getSelectedGroup(), getDraftForGroup(state.selectedGroupId));
+    scheduleAutosave();
+  });
+}
 
 snoozeMinutesField.addEventListener("input", () => {
   stashCurrentDraft();
@@ -6748,40 +6866,6 @@ const CONTENT_TAG_PLATFORMS = new Set(["youtube", "tiktok", "instagram", "facebo
 // Supports a LIST of tags (each with an optional per-tag confidence over the
 // default), "block certain tags" (include) / "block all except" (exclude), and
 // a configurable untagged behavior for the exclude case.
-function generateContentTagRuleSource({ platform, mode, tags, defaultConfidence, blockUntagged, effect }) {
-  const p = CONTENT_TAG_PLATFORMS.has(platform) ? platform : "youtube";
-  const method = effect === "block" ? "hide" : "dim";
-  const def = Math.min(5, Math.max(1, Number(defaultConfidence) || 4));
-  // Resolve each tag's threshold now, so the generated predicate stays simple.
-  // n = names that must ALL be present (AND), c = threshold, x = carve-out.
-  const list = (Array.isArray(tags) ? tags : []).map((e) => ({
-    n: [String(e && e.name), ...(Array.isArray(e && e.also) ? e.also.map(String) : [])],
-    c: Number.isFinite(e && e.confidence) ? Math.min(5, Math.max(1, e.confidence)) : def,
-    x: Boolean(e && e.except)
-  }));
-  const listLiteral = JSON.stringify(list);
-  const isExclude = mode === "exclude";
-  // Same decision as the platform tag filter (content.js matchesTagFilter).
-  const body =
-    "    const list = " + listLiteral + ";\n" +
-    "    const tags = Array.isArray(item.tags) ? item.tags : [];\n" +
-    "    const hit = (e) => e.n.every((n) => tags.some((t) => t && t.name === n && (t.confidence || 0) >= e.c));\n" +
-    "    const listMatch = list.some((e) => !e.x && hit(e)) && !list.some((e) => e.x && hit(e));\n" +
-    "    if (listMatch) return " + (isExclude ? "false" : "true") + ";\n" +
-    "    const hasConfident = tags.some((t) => (t && t.confidence || 0) >= " + def + ");\n" +
-    "    if (!hasConfident) return " + (blockUntagged ? "true" : "false") + ";\n" +
-    "    return " + (isExclude ? "true" : "false") + ";\n";
-  return (
-    "(events, helpers) => {\n" +
-    "  const p = helpers.platform()." + p + "();\n" +
-    "  p." + method + "((item) => {\n" +
-    body +
-    "  });\n" +
-    "  p.rescan();\n" +
-    "}\n"
-  );
-}
-
 // ── Classifier tag-name suggestions ──────────────────────────────────────
 // Clickable chips under a tag-list textarea, fed by the classifier's own
 // taxonomy for that platform (so a filter names tags that actually exist — a
@@ -6850,7 +6934,7 @@ function refreshTagSuggestions(container, textarea, platform) {
   });
 }
 
-// Keep chip "used" state live while typing, and follow the builder's platform.
+// Keep chip "used" state live while typing.
 function bindTagSuggestions(containerId, textarea, platformOf) {
   const container = document.getElementById(containerId);
   if (!container || !textarea) return;
@@ -6860,60 +6944,6 @@ function bindTagSuggestions(containerId, textarea, platformOf) {
   });
 }
 bindTagSuggestions("platformTagSuggestions", platformTagsField, () => String(getSelectedGroup()?.groupType || ""));
-bindTagSuggestions("contentTagSuggestions", contentTagNamesField, () => contentTagPlatformField?.value || "youtube");
-if (contentTagPlatformField) {
-  const refreshBuilderSuggestions = () => refreshTagSuggestions(
-    document.getElementById("contentTagSuggestions"), contentTagNamesField, contentTagPlatformField.value || "youtube"
-  );
-  contentTagPlatformField.addEventListener("change", refreshBuilderSuggestions);
-  contentTagNamesField?.addEventListener("focus", refreshBuilderSuggestions, { once: true });
-}
-
-function setContentTagStatus(text, isError) {
-  if (!contentTagStatus) return;
-  contentTagStatus.textContent = text || "";
-  contentTagStatus.className = isError ? "run-status error" : "run-status";
-}
-
-// The untagged toggle only matters for "block all except" (allow-list) mode.
-function syncContentTagBuilderMode() {
-  if (!contentTagBlockUntaggedRow) return;
-  const isExclude = contentTagModeField?.value === "exclude";
-  contentTagBlockUntaggedRow.classList.toggle("hidden", !isExclude);
-}
-if (contentTagModeField) {
-  contentTagModeField.addEventListener("change", syncContentTagBuilderMode);
-}
-
-if (contentTagApplyButton) {
-  contentTagApplyButton.addEventListener("click", async () => {
-    const group = getSelectedGroup();
-    if (!group || group.groupType !== "custom" || blockingRulesField.disabled) return;
-    const platform = contentTagPlatformField?.value || "youtube";
-    const mode = contentTagModeField?.value === "exclude" ? "exclude" : "include";
-    const tags = parseTagListTextarea(contentTagNamesField?.value || "");
-    if (tags.length === 0) {
-      setContentTagStatus(t("contentTag.needTag"), true);
-      contentTagNamesField?.focus();
-      return;
-    }
-    const defaultConfidence = Number(contentTagConfidenceField?.value) || 4;
-    const effect = contentTagEffectField?.value === "block" ? "block" : "dim";
-    const blockUntagged = Boolean(contentTagBlockUntaggedField?.checked);
-    // Generate the rule into the shared source field, then run it through the
-    // same compile+activate pipeline as the Run button (no manual step).
-    blockingRulesField.value = generateContentTagRuleSource({
-      platform, mode, tags, defaultConfidence, blockUntagged, effect
-    });
-    stashCurrentDraft();
-    render();
-    scheduleAutosave();
-    setContentTagStatus(t("contentTag.applying"), false);
-    await runSelectedCustomGroup();
-    setContentTagStatus(t("contentTag.applied", { count: tags.length }), false);
-  });
-}
-
 function toggleAiPromptPanel() {
   const group = getSelectedGroup();
   if (!group || group.groupType !== "custom") return;
@@ -7058,7 +7088,7 @@ discordModeField.addEventListener("change", () => {
   scheduleAutosave();
 });
 
-for (const field of [platformBlockHomePageField, redditBlockHomePageField, discordBlockHomePageField, skipToNextOnBlockField]) {
+for (const field of [platformBlockHomePageField, redditBlockHomePageField, discordBlockHomePageField]) {
   field.addEventListener("change", () => {
     stashCurrentDraft();
     renderGroupList();
