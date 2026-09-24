@@ -355,9 +355,6 @@
             </div>
             <p id="blockingRulesLint" class="code-editor-lint" aria-live="polite"></p>
             <div class="field-actions">
-              <button id="openRuleTemplatesButton" type="button" class="secondary weird" data-i18n="custom.templates">
-                Templates
-              </button>
               <button id="runCustomGroupButton" type="button" class="weird" data-i18n="custom.runButton">
                 Run
               </button>
@@ -502,6 +499,10 @@
                 <label class="checkbox-row compact" for="platformTagBlockPage">
                   <input id="platformTagBlockPage" type="checkbox" checked />
                   <span data-i18n="tagFilter.blockPage">Also black out a matching video's own page</span>
+                </label>
+                <label class="checkbox-row compact" for="platformTagCoverUntilTagged">
+                  <input id="platformTagCoverUntilTagged" type="checkbox" />
+                  <span data-i18n="tagFilter.coverUntilTagged">Cover content until it has been tagged</span>
                 </label>
                 <label id="platformTagBlockUntaggedRow" class="checkbox-row compact" for="platformTagBlockUntagged">
                   <input id="platformTagBlockUntagged" type="checkbox" />
@@ -738,39 +739,6 @@
             </div>
             <p id="snoozeWarning" class="inline-warning"></p>
           </section>
-
-          <section id="connectionGroupSection" class="section-card connection-group-section hidden">
-            <div class="section-header">
-              <div>
-                <h3 data-i18n="connectionGroup.title">Web-app Bridge</h3>
-                <p class="section-copy" data-i18n="connectionGroup.copy">
-                  Link this group with a same-named group on another connected program. Linked groups form one shared cluster.
-                </p>
-              </div>
-            </div>
-
-            <p id="connectionGroupHint" class="field-help"></p>
-
-            <div id="connectionGroupDisconnected" class="connection-group-connect hidden">
-              <div class="settings-grid">
-                <div>
-                  <label class="label" for="connectionGroupProgram" data-i18n="connectionGroup.programLabel">Designated program</label>
-                  <select id="connectionGroupProgram"></select>
-                </div>
-              </div>
-              <div class="actions">
-                <button id="connectionGroupConnectButton" type="button" data-i18n="connectionGroup.connect">Connect group</button>
-              </div>
-            </div>
-
-            <div id="connectionGroupConnected" class="connection-group-cluster hidden">
-              <p class="field-help" data-i18n="connectionGroup.membersLabel">Connected cluster</p>
-              <div id="connectionGroupMembers" class="connection-peer-list"></div>
-              <div class="actions">
-                <button id="connectionGroupDisconnectButton" type="button" class="secondary" data-i18n="connectionGroup.disconnect">Disconnect</button>
-              </div>
-            </div>
-          </section>
         </section>
       </section>
 
@@ -828,42 +796,6 @@
               <h4 class="settings-col-title" data-i18n="settings.colBehavior">Behavior</h4>
         <div class="settings-grid">
           <div>
-            <label class="label" for="settingsTickRate" data-i18n="settings.tickRate">
-              Tick rate (ms)
-            </label>
-            <input
-              id="settingsTickRate"
-              type="number"
-              min="250"
-              max="60000"
-              step="50"
-              inputmode="numeric"
-              placeholder="1000"
-              data-i18n-placeholder="settings.tickRatePlaceholder"
-            />
-            <p class="field-help" data-i18n="settings.tickRateHelp">
-              How often the shared tickEvent fires across all tabs. Lower values are more responsive but use more CPU.
-            </p>
-          </div>
-          <div>
-            <label class="label" for="settingsAutosaveDebounce" data-i18n="settings.autosaveDebounce">
-              Autosave debounce (ms)
-            </label>
-            <input
-              id="settingsAutosaveDebounce"
-              type="number"
-              min="0"
-              max="5000"
-              step="50"
-              inputmode="numeric"
-              placeholder="400"
-              data-i18n-placeholder="settings.autosaveDebouncePlaceholder"
-            />
-            <p class="field-help" data-i18n="settings.autosaveDebounceHelp">
-              How long the popup waits after the last keystroke before persisting your edits.
-            </p>
-          </div>
-          <div>
             <label class="label" for="settingsDefaultSnoozeMinutes" data-i18n="settings.defaultSnoozeMinutes">
               Default snooze duration (minutes)
             </label>
@@ -896,22 +828,6 @@
           </div>
         </div>
 
-        <label class="checkbox-row compact" for="settingsDebugMode">
-          <input id="settingsDebugMode" type="checkbox" />
-          <span data-i18n="settings.debugMode">Debug mode</span>
-        </label>
-        <p class="field-help" data-i18n="settings.debugModeHelp">
-          When on, shows the on-page debug overlay for custom rules and emits verbose [CustomBlocker] / [CustomBlocker:trace] console output. Your own helpers.log() calls always work regardless.
-        </p>
-
-        <label class="checkbox-row compact" for="settingsShowOnPageLogToasts">
-          <input id="settingsShowOnPageLogToasts" type="checkbox" />
-          <span data-i18n="settings.showOnPageLogToasts">Show custom rule logs on web pages</span>
-        </label>
-        <p class="field-help" data-i18n="settings.showOnPageLogToastsHelp">
-          When off, helpers.log(), warn(), and error() still appear in the popup Log panel but do not show page toasts. Rules can use logScreen() for screen-only toasts.
-        </p>
-
             </section>
 
             <section class="settings-col">
@@ -929,6 +845,15 @@
           </label>
           <p class="field-help" data-i18n="classifierBridge.collectionHelp">
             Only rendered public content is sent while collection is on. Ads and page entries are not retained by the extension.
+          </p>
+          <label class="label" for="classifierTaggingMode" data-i18n="classifierBridge.taggingMode">Tag videos</label>
+          <select id="classifierTaggingMode">
+            <option value="whenFiltering" data-i18n="classifierBridge.taggingWhenFiltering">Only while a tag filter is active</option>
+            <option value="always" data-i18n="classifierBridge.taggingAlways">Always</option>
+            <option value="paused" data-i18n="classifierBridge.taggingPaused">Paused</option>
+          </select>
+          <p class="field-help" data-i18n="classifierBridge.taggingModeHelp">
+            Tagging runs the local model. "Only while a tag filter is active" follows your groups' schedules, so nothing runs outside the hours you block. Paused: tag filters see everything as untagged.
           </p>
           <details id="logFeedSection" class="log-feed">
             <summary>
@@ -979,47 +904,11 @@
       </div>
     </div>
 
-    <div id="templateModal" class="modal hidden">
-      <div class="modal-card template-modal-card">
-        <div class="manual-modal-header">
-          <div>
-            <h3 data-i18n="custom.templatesTitle">Custom Rule Templates</h3>
-            <p id="templateStatus" class="modal-copy" data-i18n="custom.templatesCopy">
-              Pick a preset, tweak its parameters, then apply it to replace the current rule.
-            </p>
-          </div>
-          <button id="templateCloseButton" type="button" class="secondary" data-i18n="manual.close">
-            Close
-          </button>
-        </div>
-        <div class="template-filter-row">
-          <span data-i18n="custom.templateFilterLabel">Filter</span>
-          <div id="templateFilter" class="template-filter-scroller" aria-label="Template filters" data-i18n-aria-label="custom.templateFilterAriaLabel"></div>
-        </div>
-        <div id="templateGrid" class="template-grid"></div>
-        <div class="modal-actions">
-          <button id="templateApplyButton" type="button" class="weird" data-i18n="custom.applyTemplate" disabled>
-            Apply preset
-          </button>
-        </div>
-      </div>
-    </div>
-
     <script src="browser-compat.js"></script>
     <script src="bridge-protocol.js"></script>
     <script src="platform-profiles.js"></script>
     <script src="translations.js"></script>
     <script src="popup-markdown.js"></script>
-    <!--
-      Custom rule templates are split into category files under
-      templates/. template-utils.js MUST load first because it
-      defines window.CB_REGISTER_TEMPLATES, window.quoteJs and
-      window.minutesToMsLiteral, which every category file uses.
-      popup.js consumes window.__CUSTOM_BLOCKER_TEMPLATES, so all
-      category files must run before it.
-    -->
-    <script src="templates/template-utils.js"></script>
-    <script src="templates/examples.js"></script>
     <script src="custom-rule-ai-reference.js"></script>
     <script src="popup.js"></script>
   </body>

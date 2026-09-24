@@ -496,7 +496,7 @@ function getFeedCardData(card) {
           .filter(Boolean)
       )
     ];
-    return { videoForm: "post", creators };
+    return { videoForm: "post", creators, tags: getFeedCardTags(card) };
   }
   if (currentSite !== "youtube") {
     const href = getFeedCardHref(card, currentSite);
@@ -664,6 +664,23 @@ const CB_CONTENT_BLOCK_PROFILES = Object.freeze({
     links: /\/video\/BV/i,
     page: "#bilibili-player, .bpx-player-container, #playerWrap, #player",
     pageScope: "document"
+  },
+  // X/Twitter (verified live 2026-09-23 on x.com/home + a status page): a
+  // tweet's media is its photo / video player / link card; the status page's
+  // own tweet is the observed article, so the page verdict scopes to the root.
+  twitter: {
+    media: '[data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="tweetPhoto"], [data-testid="card.wrapper"], [data-testid="card.layoutLarge.media"], [data-testid="card.layoutSmall.media"]',
+    links: /\/status\//,
+    page: '[data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="tweetPhoto"], [data-testid="card.wrapper"], [data-testid="card.layoutLarge.media"], [data-testid="card.layoutSmall.media"]',
+    pageScope: "root"
+  },
+  // TikTok: grid/search cards carry a cover picture; the For You feed and the
+  // video page render the player in a feed-video / browse-video container.
+  tiktok: {
+    media: '[data-e2e="feed-video"], [data-e2e="browse-video"], video, picture, img',
+    links: /\/video\//,
+    page: '[data-e2e="browse-video"], [data-e2e="feed-video"], video',
+    pageScope: "document"
   }
 });
 
@@ -672,6 +689,8 @@ function cbContentBlockPlatformID(hostname) {
   if (host === "youtube.com" || host.endsWith(".youtube.com")) return "youtube";
   if (host === "reddit.com" || host.endsWith(".reddit.com")) return "reddit";
   if (host === "bilibili.com" || host.endsWith(".bilibili.com")) return "bilibili";
+  if (host === "x.com" || host.endsWith(".x.com") || host === "twitter.com" || host.endsWith(".twitter.com")) return "twitter";
+  if (host === "tiktok.com" || host.endsWith(".tiktok.com")) return "tiktok";
   return null;
 }
 
@@ -680,10 +699,20 @@ function cbContentBlockProfile() {
   return (id && CB_CONTENT_BLOCK_PROFILES[id]) || null;
 }
 
-function cbFindMedia(card) {
+// Every media element the profile names inside `card`, top-most matches only
+// (a player wraps its component; one panel covers both). A tweet may carry a
+// photo AND a video side by side, and a grid several photos — each must be
+// covered, or the block leaks through the ones after the first.
+function cbFindMediaAll(card) {
   const profile = cbContentBlockProfile();
-  if (!profile) return null;
-  try { return card.querySelector(profile.media); } catch { return null; }
+  if (!profile) return [];
+  let nodes;
+  try { nodes = [...card.querySelectorAll(profile.media)]; } catch { return []; }
+  return nodes.filter((media) => !nodes.some((other) => other !== media && other.contains(media)));
+}
+
+function cbFindMedia(card) {
+  return cbFindMediaAll(card)[0] || null;
 }
 
 // Vault pill hosts, registered by the tag pipeline. Kept in a private WeakSet
@@ -730,34 +759,43 @@ function cbEnsureRelative(el) {
   try { if (getComputedStyle(el).position === "static") el.style.position = "relative"; } catch {}
 }
 
-// Black out a card's thumbnail (idempotent; re-renders if the host recycled the
+// One opaque panel over a media element (idempotent).
+function cbCoverMedia(media, zIndex) {
+  cbEnsureRelative(media);
+  if (media.querySelector(":scope > .cb-block-panel")) return;
+  const panel = document.createElement("div");
+  panel.className = "cb-block-panel";
+  panel.setAttribute("style", `position:absolute;inset:0;z-index:${zIndex};background:#000;`);
+  media.appendChild(panel);
+}
+
+function cbUncoverMedia(media) {
+  media.querySelector(":scope > .cb-block-panel")?.remove();
+  if (media.dataset && media.dataset.cbPrevPos !== undefined) {
+    if (media.dataset.cbPrevPos) media.style.position = media.dataset.cbPrevPos;
+    else media.style.removeProperty("position");
+    delete media.dataset.cbPrevPos;
+  }
+}
+
+// Black out a card's thumbnails (idempotent; re-renders if the host recycled a
 // panel away). No controls — the block is driven purely by the tags.
 function dimElement(card) {
   if (!card) return;
-  const media = cbFindMedia(card);
-  if (!media) return; // no thumbnail to black → skip, never black the whole card
-  const hasPanel = !!media.querySelector(":scope > .cb-block-panel");
-  if (card.dataset.cbContentBlocked === "true" && hasPanel) return;
+  const medias = cbFindMediaAll(card);
+  if (medias.length === 0) return; // no thumbnail to black → skip, never black the whole card
+  if (card.dataset.cbContentBlocked === "true"
+      && medias.every((media) => media.querySelector(":scope > .cb-block-panel"))) return;
   card.dataset.cbContentBlocked = "true";
   cbInstallClickInterceptor();
-  cbEnsureRelative(media);
-  media.querySelector(":scope > .cb-block-panel")?.remove();
-  const panel = document.createElement("div");
-  panel.className = "cb-block-panel";
-  panel.setAttribute("style", "position:absolute;inset:0;z-index:60;background:#000;");
-  media.appendChild(panel);
+  for (const media of medias) cbCoverMedia(media, 60);
 }
 
 // allow verdict (or the tag no longer qualifies) → restore the card instantly.
 function undimElement(card) {
   if (!card || card.dataset.cbContentBlocked !== "true") return;
-  const media = cbFindMedia(card) || card;
-  media.querySelector(":scope > .cb-block-panel")?.remove();
-  if (media.dataset.cbPrevPos !== undefined) {
-    if (media.dataset.cbPrevPos) media.style.position = media.dataset.cbPrevPos;
-    else media.style.removeProperty("position");
-    delete media.dataset.cbPrevPos;
-  }
+  const medias = cbFindMediaAll(card);
+  for (const media of medias.length > 0 ? medias : [card]) cbUncoverMedia(media);
   delete card.dataset.cbContentBlocked;
 }
 
@@ -923,12 +961,20 @@ function cbTagPageEntryMatchesLocation(entryID, loc) {
 
 // The page's main content per platform: a document-level player (YouTube,
 // Bilibili) or the observed post's own media/body (Reddit).
-function cbFindPagePlayer(root) {
+// Every player/media element the profile names for the page, top-most matches
+// only — a post page can show a photo beside a video; all of them are covered.
+function cbFindPagePlayers(root) {
   const profile = cbContentBlockProfile();
-  if (!profile) return null;
+  if (!profile) return [];
   const scope = profile.pageScope === "root" ? root : document;
-  if (!scope || typeof scope.querySelector !== "function") return null;
-  try { return scope.querySelector(profile.page); } catch { return null; }
+  if (!scope || typeof scope.querySelectorAll !== "function") return [];
+  let nodes;
+  try { nodes = [...scope.querySelectorAll(profile.page)]; } catch { return []; }
+  return nodes.filter((player) => !nodes.some((other) => other !== player && other.contains(player)));
+}
+
+function cbFindPagePlayer(root) {
+  return cbFindPagePlayers(root)[0] || null;
 }
 
 // While the page is blocked, any attempt to play (autoplay, the keyboard
@@ -940,33 +986,23 @@ function cbKeepPausedWhileBlocked(event) {
 }
 
 function cbBlackOutPagePlayer(root) {
-  const player = cbFindPagePlayer(root);
-  if (!player) return false;
-  cbEnsureRelative(player);
-  if (!player.querySelector(":scope > .cb-block-panel")) {
-    const panel = document.createElement("div");
-    panel.className = "cb-block-panel";
-    panel.setAttribute("style", "position:absolute;inset:0;z-index:2147483000;background:#000;");
-    player.appendChild(panel);
-  }
-  for (const video of player.querySelectorAll("video")) {
-    try { video.pause(); } catch {}
-    video.addEventListener("play", cbKeepPausedWhileBlocked, true);
-    video.addEventListener("playing", cbKeepPausedWhileBlocked, true);
+  const players = cbFindPagePlayers(root);
+  if (players.length === 0) return false;
+  for (const player of players) {
+    cbCoverMedia(player, 2147483000);
+    for (const video of player.querySelectorAll("video")) {
+      try { video.pause(); } catch {}
+      video.addEventListener("play", cbKeepPausedWhileBlocked, true);
+      video.addEventListener("playing", cbKeepPausedWhileBlocked, true);
+    }
   }
   if (root && root.dataset) root.dataset.cbContentBlocked = "true";
   return true;
 }
 
 function cbClearPagePlayer(root) {
-  const player = cbFindPagePlayer(root);
-  if (player) {
-    player.querySelector(":scope > .cb-block-panel")?.remove();
-    if (player.dataset && player.dataset.cbPrevPos !== undefined) {
-      if (player.dataset.cbPrevPos) player.style.position = player.dataset.cbPrevPos;
-      else player.style.removeProperty("position");
-      delete player.dataset.cbPrevPos;
-    }
+  for (const player of cbFindPagePlayers(root)) {
+    cbUncoverMedia(player);
     for (const video of player.querySelectorAll("video")) {
       video.removeEventListener("play", cbKeepPausedWhileBlocked, true);
       video.removeEventListener("playing", cbKeepPausedWhileBlocked, true);
@@ -1034,9 +1070,20 @@ function cbEvaluateTagPage(root, meta) {
     return "allow";
   }
   cbTagPageContext = { root, entryID: meta.entryID, platform: meta.platform, settled: meta.settled !== false };
-  const action = cbTagPageContext.settled ? cbTagPageVerdict(getFeedCardTags(root)) : "allow";
+  // While still "Tagging…", cover the page only when the user opted in
+  // (cover-until-tagged); otherwise let it play until the tags arrive.
+  const pending = cbPageCoversUntilTagged(meta.platform) ? "block" : "allow";
+  const action = cbTagPageContext.settled ? cbTagPageVerdict(getFeedCardTags(root)) : pending;
   cbApplyTagPagePolicy(root, action, cbTagPageContext);
   return action;
+}
+
+// True when an active page-blocking tag filter for this platform opted into
+// covering the watch page while it is still being tagged.
+function cbPageCoversUntilTagged(platform) {
+  return latestFeedFilters.some((filter) =>
+    filter && filter.tagFilter && filter.pageEffect === "block" && filter.enforce !== false
+    && filter.tagCoverUntilTagged && (!platform || !filter.site || filter.site === platform));
 }
 
 // Tags changed for something on this page (resolved, pushed, or corrected):
@@ -1150,6 +1197,16 @@ function applyFeedFilters() {
       const cardData = getFeedCardData(card);
       if (cardData) {
         for (const filter of activeFilters) {
+          // Cover-until-tagged (opt-in): a taggable card whose tags have not
+          // settled yet is blacked out (dim) rather than left visible, so nothing
+          // flashes before it can be judged. When the tags settle a later pass
+          // re-decides — a match stays covered, a non-match is revealed.
+          if (filter.tagFilter && filter.tagCoverUntilTagged
+              && cardData.tags && cardData.tags.settled === false) {
+            exposed.add(filter.baseGroupId || filter.id);
+            if (filter.enforce !== false) cbSetCardVerdict(card, filter.id, "dim", "platform");
+            continue;
+          }
           if (!matchesFeedFilter(cardData, filter)) continue;
           // Exposure: a match means the group's usage timer should accrue,
           // regardless of whether we hide the card right now. A tag filter is a
@@ -1170,6 +1227,19 @@ function applyFeedFilters() {
   }
 
   latestExposedGroupIds = [...exposed];
+
+  if (cbDebugMode) {
+    // Debug mode only: one line per pass so a blackout that "does nothing" can
+    // be traced to its stage (no filter, no cards, tags not settled, no match).
+    let settled = 0; let dim = 0; let hide = 0;
+    for (const card of candidates) {
+      const tags = getFeedCardTags(card);
+      if (tags.settled) settled += 1;
+      const verdict = cbResolveCardVerdict(card);
+      if (verdict === "dim") dim += 1; else if (verdict === "hide") hide += 1;
+    }
+    cbDebugLog("[CustomBlocker:feed] pass", { site: currentSite, filters: activeFilters.length, cards: candidates.size, settled, dim, hide });
+  }
 
   // Refill what enforcement removed (only when the feed is too short to scroll).
   __cb_maybeReplenishFeed(currentSite);
@@ -1199,6 +1269,7 @@ function scheduleApplyFeedFilters() {
 
 function updateFeedFilters(filters) {
   latestFeedFilters = Array.isArray(filters) ? filters : [];
+  cbDebugLog("[CustomBlocker:feed] filters received", latestFeedFilters.length, "site", getCurrentFeedSite(), latestFeedFilters.map((f) => `${f && f.site}:${f && f.tagFilter ? "tag" : "author"}`));
   reconcilePageMutations();
   if (cbTagPageContext) cbEvaluateTagPage(cbTagPageContext.root, cbTagPageContext);
 }
@@ -3416,6 +3487,17 @@ const __cb_PLATFORM_CSS = {
   },
   twitch: {
     comments: 'section[data-test-selector="chat-room-component-layout"] { display: none !important; }'
+  },
+  reddit: {
+    comments: "shreddit-comment-tree, #comment-tree, .commentarea, shreddit-comments-page-tools { display: none !important; }"
+  },
+  twitter: {
+    // Replies under a status page: everything in the conversation timeline
+    // after the first cell (the tweet itself).
+    comments: '[aria-label="Timeline: Conversation"] [data-testid="cellInnerDiv"]:not(:first-of-type) { display: none !important; }'
+  },
+  bilibili: {
+    comments: "#comment, #commentapp, bili-comments, .comment-container, .bili-comment { display: none !important; }"
   }
 };
 
@@ -3436,6 +3518,16 @@ function __cb_isOnPlatformHome(platform) {
       return p === "/" || p === "/watch" || p.startsWith("/watch/");
     case "twitch":
       return p === "/" || p === "/directory" || p.startsWith("/directory/");
+    case "reddit": {
+      const trimmed = p.replace(/\/+$/, "") || "/";
+      return trimmed === "/" || /^\/(best|hot|new|top|rising)$/i.test(trimmed) || /^\/r\/(all|popular)$/i.test(trimmed);
+    }
+    case "bilibili": {
+      const host = String(location.hostname || "").toLowerCase();
+      return (host === "bilibili.com" || host === "www.bilibili.com") && (p === "/" || p === "/index.html");
+    }
+    case "twitter":
+      return p === "/" || p === "/home" || p === "/explore" || p.startsWith("/explore/") || p.startsWith("/i/trends");
     default:
       return false;
   }
@@ -3448,6 +3540,9 @@ function __cb_currentPlatform() {
   if (host === "instagram.com" || host?.endsWith(".instagram.com")) return "instagram";
   if (host === "facebook.com" || host?.endsWith(".facebook.com")) return "facebook";
   if (host === "twitch.tv" || host?.endsWith(".twitch.tv") || host === "clips.twitch.tv") return "twitch";
+  if (host === "reddit.com" || host?.endsWith(".reddit.com")) return "reddit";
+  if (host === "bilibili.com" || host?.endsWith(".bilibili.com")) return "bilibili";
+  if (host === "x.com" || host?.endsWith(".x.com") || host === "twitter.com" || host?.endsWith(".twitter.com")) return "twitter";
   return null;
 }
 
@@ -3494,13 +3589,27 @@ function __cb_extractCardItem(card, platform) {
         videoForm = detectVideoSiteContext(normalizeHostname(u.hostname), u.pathname).form;
       } catch {}
     }
-    creators = [
-      ...new Set(
-        [...card.querySelectorAll("a[href]")]
-          .map((a) => normalizePlatformAuthorInput(a.getAttribute("href"), platform))
-          .filter(Boolean)
-      )
-    ];
+    if (platform === "reddit") {
+      // Reddit's author axis is the subreddit (what its platform rules filter on).
+      const subreddit = extractRedditSubredditFromCard(card);
+      creators = subreddit ? [subreddit] : [];
+    } else if (platform === "twitter") {
+      creators = [
+        ...new Set(
+          [...card.querySelectorAll('a[role="link"][href^="/"], a[href^="/"]')]
+            .map((anchor) => normalizeTwitterHandleInput(anchor.getAttribute("href")))
+            .filter(Boolean)
+        )
+      ];
+    } else {
+      creators = [
+        ...new Set(
+          [...card.querySelectorAll("a[href]")]
+            .map((a) => normalizePlatformAuthorInput(a.getAttribute("href"), platform))
+            .filter(Boolean)
+        )
+      ];
+    }
   }
 
   let name = "";
