@@ -597,6 +597,27 @@ function detectVideoSiteContext(hostname, pathname) {
     return { site: "twitch", form: "unknown" };
   }
 
+  if (hostname === "reddit.com" || hostname?.endsWith(".reddit.com")) {
+    // A post permalink is Reddit's one content form; everything else (feeds,
+    // subreddit pages, user pages) is chrome for the custom-rule engine.
+    return /^\/r\/[^/]+\/comments\//i.test(safePathname)
+      ? { site: "reddit", form: "post" }
+      : { site: "reddit", form: "unknown" };
+  }
+
+  if (hostname === "bilibili.com" || hostname?.endsWith(".bilibili.com")) {
+    return /^\/video\/(BV[0-9A-Za-z_-]+|av\d+)/i.test(safePathname)
+      ? { site: "bilibili", form: "long" }
+      : { site: "bilibili", form: "unknown" };
+  }
+
+  if (isTwitterHost(hostname)) {
+    // A status permalink is X's one content form; feeds and profiles are chrome.
+    return /^\/[^/]+\/status\/\d+/i.test(safePathname)
+      ? { site: "twitter", form: "post" }
+      : { site: "twitter", form: "unknown" };
+  }
+
   return { site: null, form: "unknown" };
 }
 
@@ -1351,6 +1372,8 @@ const PLATFORM_PROFILES = {
         "faceplate-tracker[source=\"search\"] shreddit-post",
         "div.thing[data-subreddit]"
       ],
+      // The post permalink: what a custom rule's item.url / videoForm read.
+      hrefSelectors: ['a[href*="/comments/"]'],
       replenish: { scroll: true }
     },
     surfaceHides: [
@@ -1390,6 +1413,8 @@ const PLATFORM_PROFILES = {
     feed: {
       anchorSelectors: ['article[data-testid="tweet"]'],
       cardSelectors: ['[data-testid="cellInnerDiv"]:has(article[data-testid="tweet"])'],
+      // The status permalink: what a custom rule's item.url / videoForm read.
+      hrefSelectors: ['a[href*="/status/"]'],
       replenish: { scroll: true }
     },
     surfaceHides: [
@@ -1475,7 +1500,10 @@ const PLATFORM_PROFILES = {
     feed: {
       anchorSelectors: ['a[href*="/video/BV"]'],
       hrefSelectors: ['a[href*="/video/BV"]'],
-      containerSelectors: ['.bili-video-card', 'article', 'li'],
+      // `.video-page-card-small` is the watch page's "up next" card (verified
+      // live 2026-09-23): it has no .bili-video-card / article / li ancestor, so
+      // without it the tag filter could never black out related videos.
+      containerSelectors: ['.bili-video-card', '.video-page-card-small', 'article', 'li'],
       replenish: { scroll: true }
     },
     surfaceHides: []

@@ -50,6 +50,11 @@ if (typeof importScripts === "function") {
   } catch (error) {
     console.error("[CustomBlocker] importScripts(helpers.js) failed", error);
   }
+  try {
+    if (typeof cbActivity === "undefined") importScripts("vault-activity.js");
+  } catch (error) {
+    console.error("[CustomBlocker] importScripts(vault-activity.js) failed", error);
+  }
 }
 
 const helperBundle = self.__customBlockerHelpers;
@@ -456,6 +461,10 @@ function sanitizeGroups(groups) {
         // place. On unless explicitly turned off: feed-dim + page-block is the
         // product default for content-tag blocking.
         platformTagBlockPage: group?.platformTagBlockPage !== false,
+        // Optional (default off): cover taggable cards / the watch page while the
+        // classifier is still tagging, instead of leaving them visible until the
+        // tags arrive. Revealed when the tags settle and do not match.
+        platformTagCoverUntilTagged: group?.platformTagCoverUntilTagged === true,
         redditSubreddits: [
           ...new Set(rawRedditSubreddits.map(normalizeRedditSubredditInput).filter(Boolean))
         ],
@@ -1037,6 +1046,18 @@ function applyRuntimeNormalizations(
   };
 }
 
+// Tagging schedule (owner idea, 2026-09-23): the classifier is only asked to tag
+// a platform while a tag filter for it is active — i.e. some enabled, un-snoozed
+// group of that site whose schedule window is open has a tag filter. Reuses
+// the feed-filter builder so "active" means exactly what blocking means.
+globalThis.cbHasActiveTagFilter = async function cbHasActiveTagFilter(platform, now = Date.now()) {
+  if (typeof platform !== "string" || !platform) return false;
+  const { groups, usageTimersMs, groupSnoozes } = await getState();
+  const pageContext = { hostname: "", videoSite: platform, isRedditPage: platform === "reddit" };
+  return buildPlatformFeedFilters(pageContext, groups, usageTimersMs, groupSnoozes, now)
+    .some((filter) => filter && filter.tagFilter);
+};
+
 async function getState() {
   const baseState = await loadStoredState();
   const normalized = applyRuntimeNormalizations(
@@ -1129,6 +1150,7 @@ function pushTagFilterEntry(filters, group, enforce) {
     effectVerdict: group.platformTagEffect === "block" ? "hide" : "dim",
     // content.js evaluates the page's own entry against this same filter.
     pageEffect: group.platformTagBlockPage !== false ? "block" : "allow",
+    tagCoverUntilTagged: group.platformTagCoverUntilTagged === true,
     enforce
   });
 }
@@ -1733,6 +1755,24 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     console.error("Failed to sync blocking rules after alarm.", error);
   });
 });
+
+// Activity log (browser feeders): drive the flush/settings-refresh alarm and
+// receive watched-content records + config queries from the page script.
+if (typeof cbActivity !== "undefined") {
+  chrome.alarms.onAlarm.addListener((alarm) => { cbActivity.onAlarm(alarm); });
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (!message || typeof message !== "object") return false;
+    if (message.kind === "vault-activity-watched") {
+      cbActivity.recordWatched(message.record);
+      return false;
+    }
+    if (message.kind === "vault-activity-config") {
+      sendResponse({ "content-watched": !!cbActivity.enabled["content-watched"] });
+      return false;
+    }
+    return false;
+  });
+}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "action-icon-color-scheme") {
@@ -4033,14 +4073,6 @@ const cbConnection = {
         this.applySharedToStorage();
         break;
       }
-      case "connect-group-rejected":
-        if (!this.routeIsReady("macapp")) break;
-        try {
-          chrome.runtime
-            .sendMessage({ type: "group-rejected", reason: msg.reason || "" })
-            .catch(() => {});
-        } catch (_) {}
-        break;
       case "pong":
         break;
       case "classifier-response":
@@ -4053,6 +4085,12 @@ const cbConnection = {
         // correlation: the vault bridge validates the body and fans it out to
         // the platform's tabs.
         if (self.CBClassifierBroadcastReceive) self.CBClassifierBroadcastReceive(msg);
+        break;
+      case "browser-request":
+        // Mac Vault's MCP server driving the extension's settings (1:1 parity
+        // with the popup). Only an authenticated hub host reaches this branch.
+        if (!this.routeIsReady("macapp")) break;
+        void cbHandleBrowserRequest(this, msg);
         break;
       default:
         break;
@@ -4101,6 +4139,144 @@ const cbConnection = {
 
 // Classifier requests share the automatic local WebSocket and are relayed only
 // while a Vault Classifier host or peer is present.
+// ── Extension settings over the hub (owner 2026-09-23: MCP 1:1 parity) ──────
+// Mac Vault relays `browser-request` frames from its in-process MCP server; the
+// extension is the authority on which operations it honours. Every write goes
+// through the same sanitizers the popup's saves go through (sanitizeGroups /
+// createDefaultGroup), so a process can do exactly what the popup can — and a
+// frozen / strict / parental group is as untouchable here as it is in the popup.
+const CB_BROWSER_REQUEST_OPERATIONS = Object.freeze([
+  "settings-get",
+  "settings-set-group",
+  "settings-create-group",
+  "settings-delete-group",
+  "settings-set-classifier",
+  "settings-set-global"
+]);
+const CB_CLASSIFIER_SETTINGS_STORAGE_KEY = "vaultClassifierSettings";
+const CB_TAGGING_MODES = Object.freeze(["whenFiltering", "always", "paused"]);
+
+function cbGroupIsLocked(group) {
+  return Boolean(group) && group.freezeMode !== "none" && group.freezeMode !== undefined;
+}
+
+async function cbBrowserRequestBody(operation, body) {
+  const input = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  switch (operation) {
+    case "settings-get": {
+      const { groups, usageTimersMs, groupSnoozes } = await getState();
+      const stored = await chrome.storage.local.get([CB_CLASSIFIER_SETTINGS_STORAGE_KEY, CB_GLOBAL_SETTINGS_KEY]);
+      const raw = stored?.[CB_CLASSIFIER_SETTINGS_STORAGE_KEY];
+      return {
+        groups,
+        usageTimersMs,
+        groupSnoozes,
+        classifierSettings: {
+          collectionEnabled: !raw || raw.collectionEnabled !== false,
+          taggingMode: raw && CB_TAGGING_MODES.includes(raw.taggingMode) ? raw.taggingMode : "whenFiltering"
+        },
+        globalSettings: stored?.[CB_GLOBAL_SETTINGS_KEY] && typeof stored[CB_GLOBAL_SETTINGS_KEY] === "object" ? stored[CB_GLOBAL_SETTINGS_KEY] : {},
+        operations: CB_BROWSER_REQUEST_OPERATIONS
+      };
+    }
+    case "settings-create-group": {
+      const groupType = typeof input.groupType === "string" ? input.groupType : "";
+      if (!PLATFORM_GROUP_TYPES.includes(groupType) && groupType !== "site" && groupType !== "custom") {
+        throw new Error("unknown-group-type");
+      }
+      const patch = input.patch && typeof input.patch === "object" && !Array.isArray(input.patch) ? input.patch : {};
+      const draft = { ...createDefaultGroup(groupType), ...patch, groupType };
+      const [group] = sanitizeGroups([draft]);
+      if (!group) throw new Error("invalid-group");
+      const { groups } = await getState();
+      if (groups.some((existing) => existing.id === group.id)) throw new Error("duplicate-group-id");
+      await chrome.storage.local.set({ [BLOCKED_GROUPS_KEY]: [...groups, group] });
+      return { group };
+    }
+    case "settings-set-group": {
+      const id = typeof input.id === "string" ? input.id : "";
+      const patch = input.patch && typeof input.patch === "object" && !Array.isArray(input.patch) ? input.patch : null;
+      if (!id || !patch) throw new Error("missing-id-or-patch");
+      const { groups } = await getState();
+      const index = groups.findIndex((group) => group.id === id);
+      if (index < 0) throw new Error("group-not-found");
+      if (cbGroupIsLocked(groups[index])) throw new Error("group-locked");
+      // The id and the lock state are never patchable — same as the popup.
+      const { id: _id, freezeMode: _freeze, frozenAtMs: _frozenAt, parentalPasswordHash: _hash, parentalPasswordSalt: _salt, ...safePatch } = patch;
+      const [group] = sanitizeGroups([{ ...groups[index], ...safePatch, id }]);
+      if (!group) throw new Error("invalid-group");
+      const next = groups.slice();
+      next[index] = group;
+      await chrome.storage.local.set({ [BLOCKED_GROUPS_KEY]: next });
+      return { group };
+    }
+    case "settings-delete-group": {
+      const id = typeof input.id === "string" ? input.id : "";
+      const { groups } = await getState();
+      const group = groups.find((candidate) => candidate.id === id);
+      if (!group) throw new Error("group-not-found");
+      if (cbGroupIsLocked(group)) throw new Error("group-locked");
+      await chrome.storage.local.set({ [BLOCKED_GROUPS_KEY]: groups.filter((candidate) => candidate.id !== id) });
+      return { deleted: id };
+    }
+    case "settings-set-classifier": {
+      const stored = await chrome.storage.local.get(CB_CLASSIFIER_SETTINGS_STORAGE_KEY);
+      const current = stored?.[CB_CLASSIFIER_SETTINGS_STORAGE_KEY] && typeof stored[CB_CLASSIFIER_SETTINGS_STORAGE_KEY] === "object"
+        ? { ...stored[CB_CLASSIFIER_SETTINGS_STORAGE_KEY] } : {};
+      if (input.taggingMode !== undefined) {
+        if (!CB_TAGGING_MODES.includes(input.taggingMode)) throw new Error("invalid-tagging-mode");
+        current.taggingMode = input.taggingMode;
+      }
+      if (input.collectionEnabled !== undefined) current.collectionEnabled = input.collectionEnabled === true;
+      await chrome.storage.local.set({ [CB_CLASSIFIER_SETTINGS_STORAGE_KEY]: current });
+      return {
+        classifierSettings: {
+          collectionEnabled: current.collectionEnabled !== false,
+          taggingMode: CB_TAGGING_MODES.includes(current.taggingMode) ? current.taggingMode : "whenFiltering"
+        }
+      };
+    }
+    case "settings-set-global": {
+      // The popup's global settings, sanitized the way its save does.
+      const stored = await chrome.storage.local.get(CB_GLOBAL_SETTINGS_KEY);
+      const current = stored?.[CB_GLOBAL_SETTINGS_KEY] && typeof stored[CB_GLOBAL_SETTINGS_KEY] === "object" ? stored[CB_GLOBAL_SETTINGS_KEY] : {};
+      const patch = input.patch && typeof input.patch === "object" && !Array.isArray(input.patch) ? input.patch : null;
+      if (!patch) throw new Error("missing-patch");
+      const merged = { ...current, ...patch };
+      const clamp = (value, min, max, fallback) => { const n = Number(value); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback; };
+      const next = {
+        tickRateMs: Math.round(clamp(merged.tickRateMs, 100, 10_000, 250)),
+        autosaveDebounceMs: Math.round(clamp(merged.autosaveDebounceMs, 0, 10_000, 400)),
+        debugMode: merged.debugMode === true,
+        showOnPageLogToasts: merged.showOnPageLogToasts !== false,
+        defaultSnoozeMinutes: (() => { const n = Number.parseFloat(merged.defaultSnoozeMinutes); return Number.isFinite(n) && n > 0 ? n : 5; })(),
+        defaultFallbackUrl: typeof merged.defaultFallbackUrl === "string" ? merged.defaultFallbackUrl.trim() : ""
+      };
+      await chrome.storage.local.set({ [CB_GLOBAL_SETTINGS_KEY]: next });
+      return { globalSettings: next };
+    }
+    default:
+      throw new Error("unsupported-operation");
+  }
+}
+
+// Answers one relayed request on the hub socket; every path replies exactly
+// once, with a bounded error string on failure.
+async function cbHandleBrowserRequest(connection, msg) {
+  const requestID = typeof msg?.requestID === "string" ? msg.requestID.slice(0, 128) : "";
+  const operation = typeof msg?.operation === "string" ? msg.operation.slice(0, 64) : "";
+  if (!requestID || !operation) return;
+  const reply = (frame) => { try { connection.sendWS({ kind: "browser-response", requestID, operation, ...frame }); } catch (_) {} };
+  if (!CB_BROWSER_REQUEST_OPERATIONS.includes(operation)) { reply({ error: "unsupported-operation" }); return; }
+  try {
+    reply({ body: await cbBrowserRequestBody(operation, msg.body) });
+  } catch (error) {
+    const text = String(error?.message || error || "error").replace(/[^\x20-\x7e]/g, "").slice(0, 200);
+    reply({ error: text || "error" });
+  }
+}
+self.cbHandleBrowserRequest = cbHandleBrowserRequest;
+
 const CB_CLASSIFIER_HUB_MAX_PENDING = 16;
 // The native relay expires first (30 seconds), leaving this browser deadline
 // enough margin to receive its explicit timeout without racing a late reply.
@@ -4320,7 +4496,7 @@ const cbClassifierHub = {
   // Every operation the extension may send over the shared classifier route.
   // Keep in sync with LocalClassifierHub.swift and ConnectionHub.swift — the
   // parity suite (tests/runner-hub-op-parity.js) fails if the copies drift.
-  operations: ["bridge-info", "collection-info", "diagnostic", "collect", "video-tags", "video-tags-batch", "classifier-taxonomy", "submit-correction", "dev-log"],
+  operations: ["bridge-info", "collection-info", "diagnostic", "collect", "video-tags", "video-tags-batch", "classifier-taxonomy", "submit-correction", "dev-log", "activity-record", "activity-settings"],
 
   request(operation, body) {
     if (!this.operations.includes(operation)) {
@@ -4436,27 +4612,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case "connection-status":
       sendResponse({ ok: true, status: cbConnection.statusForTarget("macapp") });
       return false;
-    case "group-connect":
-      if (!cbConnection.routeIsReady("macapp")) { sendResponse({ ok: false, error: "macapp-unavailable" }); return false; }
-      cbConnection.sendWS({
-        kind: "connect-group",
-        groupName: message.groupName,
-        groupType: message.groupType,
-        fromProgram: message.fromProgram,
-        toProgram: message.toProgram
-      });
-      sendResponse({ ok: true });
-      return false;
-    case "group-disconnect":
-      if (!cbConnection.routeIsReady("macapp")) { sendResponse({ ok: false, error: "macapp-unavailable" }); return false; }
-      cbConnection.sendWS({
-        kind: "disconnect-group",
-        clusterId: message.clusterId,
-        groupName: message.groupName,
-        program: message.program
-      });
-      sendResponse({ ok: true });
-      return false;
     case "groups-announce":
       cbConnection.lastAnnounce = {
         kind: "groups-announce",
@@ -4498,5 +4653,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Every service-worker lifetime participates in the authenticated local hub.
 cbConnection.startAutomatically();
+
+// Start the Activity log's browser feeders (web-visit dwell + watched content).
+// Records only while the matching category is enabled in the native settings.
+if (typeof cbActivity !== "undefined") {
+  cbActivity.init().catch((error) => {
+    console.error("[CustomBlocker] activity init failed", error);
+  });
+}
 
 // ===========================================================================
