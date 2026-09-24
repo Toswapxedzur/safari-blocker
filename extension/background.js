@@ -591,9 +591,15 @@ function sanitizeGroups(groups) {
       const storedLines = hasLines
         ? CBGroupScopes.sanitizeScopeLines(input.scopes, normalizedGroupType, cbScopeNormalizers)
         : [];
-      const scopes = useStoredLines
+      let scopes = useStoredLines
         ? storedLines
         : CBGroupScopes.mergeFlatIntoScopes(storedLines, normalized, normalizedGroupType);
+      // A website list patched onto a platform group edits its Websites entry
+      // (owner 2026-09-24): the flat `sites`/`allowlist` describe that entry.
+      if (!useStoredLines && CBGroupScopes.platformKind(normalizedGroupType) !== "site" && normalizedGroupType !== "custom"
+          && (Object.prototype.hasOwnProperty.call(input, "sites") || Object.prototype.hasOwnProperty.call(input, "allowlist"))) {
+        scopes = CBGroupScopes.mergeFlatIntoScopes(scopes, normalized, "site");
+      }
       return {
         ...CBGroupScopes.withoutFlatScopeFields(normalized),
         groupType: CBGroupScopes.deriveGroupType(scopes, normalizedGroupType),
@@ -3939,7 +3945,7 @@ function cbReportClusterUsage(groups, timers, resets, bucketDeltas = {}, buckets
     if (!cbConnection.routeIsReady("macapp")) return;
     const program = cbDetectProgramId();
     for (const g of groups) {
-      if (!g || g.groupType !== "site") continue;
+      if (!g) continue;
       const inCluster = clusters.some(
         (cluster) => self.CBBridgeProtocol.clusterForGroup([cluster], g, program) === cluster
       );
@@ -3956,7 +3962,6 @@ function cbReportClusterUsage(groups, timers, resets, bucketDeltas = {}, buckets
           kind: "group-sync",
           program,
           groupName: g.name,
-          groupType: "site",
           usageResetAtMs: 0,
           ...(seeded ? { usageBuckets: deltas } : { usageBucketsSeed: buckets[g.id] ?? {} }),
           ts: Date.now()
@@ -3978,7 +3983,6 @@ function cbReportClusterUsage(groups, timers, resets, bucketDeltas = {}, buckets
         kind: "group-sync",
         program,
         groupName: g.name,
-        groupType: "site",
         usageDeltaMs: delta,
         usageMs: current,
         usageResetAtMs: resetAt,
@@ -4148,7 +4152,7 @@ const cbConnection = {
       let usageChanged = false;
       for (const cluster of relevant) {
         const shared = cluster.shared;
-        if (!shared || (cluster.groupType && cluster.groupType !== "site")) continue;
+        if (!shared) continue;
         const grp = self.CBBridgeProtocol.groupForCluster(groups, cluster, program);
         if (!grp || !grp.id) continue;
         if (grp.rollingLimit) {
@@ -4998,12 +5002,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         kind: "group-sync",
         program: message.program,
         groupName: message.groupName,
-        groupType: message.groupType,
         ts: message.ts,
         priority: message.priority === true,
+        // The whole definition: policy scalars + every entry's lines.
         scalars: message.scalars,
-        sites: message.sites,
-        apps: message.apps,
+        scopes: message.scopes,
         // Active-snooze runtime must be relayed too — without these the popup's
         // snooze never reaches the hub and a snooze started on one member never
         // propagates to its linked peers.
