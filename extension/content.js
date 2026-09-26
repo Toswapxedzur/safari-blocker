@@ -868,29 +868,27 @@ function cbClearSourceEverywhere(source) {
   }
 }
 
-// Resolve from the ordered ledger: the lowest-index (top-most) group with an
-// opinion decides. Returns the winning verdict — "hide" | "dim" | "show".
-// ("allow" rescues resolve to "show"; no opinion → "show".)
+// Resolve from the ordered ledger, walking from the top of the list (owner
+// 2026-09-26): blocks add up — a card one group hides and another dims is
+// hidden (hiding a dimmed card is no conflict) — until a custom rule's
+// allow(), which rescues the card from every group below it.
+// Returns "hide" | "dim" | "show".
 function cbResolveCardVerdict(card) {
   const entry = cbVerdictLedger.get(card);
   if (!entry || entry.size === 0) return "show";
-  let bestIndex = Infinity;
-  let bestVerdict = null;
-  for (const [filterId, value] of entry) {
-    // Platform verdicts are keyed by feed-filter id (`<group id>␟<line id>`);
-    // priority is the group's, so resolve the group part.
+  // Platform verdicts are keyed by feed-filter id (`<group id>␟<line id>`);
+  // priority is the group's, so resolve the group part.
+  const opinions = [...entry].map(([filterId, value]) => {
     const groupId = filterId.split("␟")[0];
-    const index = cbGroupIndex.has(groupId)
-      ? cbGroupIndex.get(groupId)
-      : Number.MAX_SAFE_INTEGER;
-    if (index < bestIndex) {
-      bestIndex = index;
-      bestVerdict = value.v;
-    }
+    return { index: cbGroupIndex.has(groupId) ? cbGroupIndex.get(groupId) : Number.MAX_SAFE_INTEGER, v: value.v };
+  }).sort((left, right) => left.index - right.index);
+  let dim = false;
+  for (const { v } of opinions) {
+    if (v === "allow") break;
+    if (v === "hide") return "hide";
+    if (v === "dim") dim = true;
   }
-  if (bestVerdict === "hide") return "hide";
-  if (bestVerdict === "dim") return "dim";
-  return "show";
+  return dim ? "dim" : "show";
 }
 
 function cbApplyCard(card) {
@@ -1686,7 +1684,8 @@ function cbRenderCover() {
     go.disabled = cbCover.countdownLeft > 0;
     go.addEventListener("click", () => {
       go.disabled = true;
-      safeSendMessage({ type: "pause-pass" }, () => refreshSession());
+      // Continue passes THIS group's pause; the page is then re-decided.
+      safeSendMessage({ type: "pause-pass", groupId: exit.groupId }, () => refreshSession());
     });
     shell.appendChild(go);
   }
@@ -4168,12 +4167,7 @@ async function __cb_checkPagePredicate() {
   };
   const reply = await __cb_evaluateItems(platform, slot, [item]);
   const r = reply && reply.results && reply.results[0];
-  if (r && r.hide && r.blockPageOnVisit) {
-    if (typeof attemptExitPage === "function") {
-      try { attemptExitPage(""); return; } catch {}
-    }
-    location.replace("about:blank");
-  }
+  if (r && r.hide && r.blockPageOnVisit) attemptExitPage();
 }
 
 function __cb_applyEventIntent(intent) {
@@ -4197,13 +4191,7 @@ function __cb_applyEventIntent(intent) {
         // Only exit if we are actually on the platform's home feed; the
         // intent is sticky so it would otherwise nuke every page on
         // every dispatch.
-        if (__cb_isOnPlatformHome(platform)) {
-          if (typeof attemptExitPage === "function") {
-            try { attemptExitPage(""); } catch {}
-          } else {
-            location.replace("about:blank");
-          }
-        }
+        if (__cb_isOnPlatformHome(platform)) attemptExitPage();
       } else if (platformIntent.kind === "shortButton" && cssTable.shortButton) {
         if (platformIntent.value === "hide") __cb_setPlatformStyle(platform + "-shortButton", cssTable.shortButton);
         else if (platformIntent.value === "show") __cb_clearPlatformStyle(platform + "-shortButton");
@@ -4269,10 +4257,8 @@ function __cb_processApplyMessage(message) {
       : (typeof message.result === "string" && message.result.trim() ? message.result.trim() : "");
     if (redirect) {
       location.replace(redirect);
-    } else if (typeof attemptExitPage === "function") {
-      try { attemptExitPage(""); } catch { location.replace("about:blank"); }
     } else {
-      location.replace("about:blank");
+      attemptExitPage();
     }
   } else if (typeof message.result === "string" && message.result.trim()) {
     location.replace(message.result.trim());
