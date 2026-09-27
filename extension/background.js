@@ -78,6 +78,9 @@ const {
   cbBucketsUsedMs, cbNextReturnMs, sanitizeUsageTimers, sanitizeSnoozeTotals, sanitizeResetTimes,
   sanitizeUsageBuckets, sanitizeSnoozes, isGroupActiveNow
 } = CBGroupActions;
+// One group's defaults and sanitizer, and the site / tag normalizers: one copy,
+// in group-scopes.js (the editor and Mac Vault use it too).
+const { createDefaultGroup, sanitizeGroups, normalizeSiteInput, normalizeTagFilterMode, clampTagConfidence } = CBGroupScopes;
 
 
 const helperBundle = self.__customBlockerHelpers;
@@ -172,68 +175,6 @@ function queueUsageTimerUpdate(task) {
 // of the worker can assume well-formed data.
 // ────────────────────────────────────────────────────────────────────────
 
-function createDefaultGroup(groupType = DEFAULT_GROUP_TYPE) {
-  const normalizedGroupType = normalizeGroupType(groupType);
-  return {
-    id: createGroupId(),
-    groupType: normalizedGroupType,
-    name:
-      PLATFORM_PROFILES[normalizedGroupType]?.defaultName ??
-      (normalizedGroupType === "custom" ? "Custom Block" : "Block Group"),
-    enabled: true,
-    mode: "instant",
-    allowedMinutes: DEFAULT_ALLOWED_MINUTES,
-    resetIntervalHours: DEFAULT_RESET_INTERVAL_HOURS,
-    resetAtMidnight: false,
-    rollingLimit: false,
-    allowSnooze: true,
-    snoozeMinutes: DEFAULT_SNOOZE_MINUTES,
-    snoozeActivationDelayMinutes: DEFAULT_SNOOZE_ACTIVATION_DELAY_MINUTES,
-    snoozeCooldownMinutes: DEFAULT_SNOOZE_COOLDOWN_MINUTES,
-    snoozeConfirmations: DEFAULT_SNOOZE_CONFIRMATIONS,
-    activeDays: createDefaultDays(),
-    timeWindowsText: "",
-    platformVideoMode: "all",
-    // Source axis: creators / accounts / subreddits (Discord keeps its own pair).
-    sourceMode: "all",
-    sources: [],
-    discordMode: "all",
-    discordTargets: [],
-    surfaceHides: [],
-    blockingRulesText:
-      "(month, dayOfMonth, dayName, hour, minute, url, helpers) => false",
-    ...CBGroupActions.normalizeLock({}),
-    sites: [],
-    // allowlist=false → the `sites` list is a blocklist (block those domains,
-    // pass everything else). allowlist=true → the `sites` list is an allowlist
-    // (block the whole web EXCEPT those domains). Honored for "site" and
-    // "custom" groups; the feed-level `effect` flag below is unrelated.
-    allowlist: false,
-    blockHomePage: false,
-    fallbackUrl: "",
-    pauseSeconds: DEFAULT_PAUSE_SECONDS
-  };
-}
-
-// A site entry is a host ("youtube.com": that host and its subdomains) or a
-// host plus a path prefix ("youtube.com/shorts": only that path and everything
-// under it; owner 2026-09-24). Scheme, www., query and hash are dropped.
-function normalizeSiteInput(value) {
-  const trimmed = String(value ?? "").trim().toLowerCase();
-  if (!trimmed) return null;
-  const maybeUrl = trimmed.includes("://") ? trimmed : `https://${trimmed}`;
-  try {
-    const parsedUrl = new URL(maybeUrl);
-    let hostname = parsedUrl.hostname.trim().toLowerCase();
-    if (!hostname) return null;
-    if (hostname.startsWith("www.")) hostname = hostname.slice(4);
-    const path = parsedUrl.pathname.replace(/\/+$/, "");
-    return path && path !== "/" ? hostname + path : hostname;
-  } catch {
-    return null;
-  }
-}
-
 function siteEntryParts(entry) {
   const text = String(entry ?? "");
   const slash = text.indexOf("/");
@@ -259,188 +200,6 @@ function siteEntryMatches(hostname, pathname, entry) {
 // normalizeRedditSubredditInput, normalizeDiscordMode and
 // normalizeDiscordTargetInput are provided as globals from there.
 
-// ── Content-tag filter (platform rules) normalizers ──────────────────────
-// A platform group can block by content tag (from the Vault classifier), like
-// the author filter but keyed on WHAT the content is. Modes: "all" (off),
-// "include" (block listed tags), "exclude" (block all except listed tags).
-function normalizeTagFilterMode(value) {
-  return value === "include" || value === "exclude" ? value : "all";
-}
-function clampTagConfidence(value, fallback) {
-  const c = Number(value);
-  return Number.isFinite(c) ? Math.min(5, Math.max(1, Math.round(c))) : fallback;
-}
-// The context's own normalizers for the line fields whose normalization
-// differs between the worker and the popup (see group-scopes.js).
-const cbScopeNormalizers = {
-  normalizeSiteInput: (value) => normalizeSiteInput(value),
-  normalizeTagFilterMode: (value) => normalizeTagFilterMode(value),
-  normalizeTagList: (value) => CBGroupScopes.normalizeTagList(value),
-  clampTagConfidence: (value, fallback) => clampTagConfidence(value, fallback)
-};
-
-// Sanitizes stored / patched groups into the canonical shape: policy fields +
-// `scopes` (group-scopes.js). Input may be canonical (a stored group), flat
-// (the popup's form model, a legacy store, an MCP patch of flat fields) or
-// canonical with flat fields patched on top — flat fields always describe the
-// intended lines, so they win over lines merged underneath.
-function sanitizeGroups(groups) {
-  if (!Array.isArray(groups)) return [];
-
-  return groups
-    .map((input, index) => {
-      const hasLines = CBGroupScopes.hasScopeLines(input);
-      const flatPatched = CBGroupScopes.hasFlatScopeFields(input);
-      const group = hasLines ? { ...CBGroupScopes.flatFromScopes(input), ...input } : input;
-      const useStoredLines = hasLines && !flatPatched;
-      const baseGroup = createDefaultGroup(normalizeGroupType(group?.groupType));
-      const hasStoredDays = Array.isArray(group?.activeDays);
-      const rawDays = hasStoredDays ? group.activeDays : createDefaultDays();
-      const activeDays = rawDays
-        .map((day) => String(day).trim().toLowerCase())
-        .filter((day, dayIndex, array) => DAY_NAMES.includes(day) && array.indexOf(day) === dayIndex);
-      const rawTimeWindowsText =
-        typeof group?.timeWindowsText === "string"
-          ? group.timeWindowsText
-          : Array.isArray(group?.timeWindows)
-            ? group.timeWindows.join("\n")
-            : "";
-      // One source list per group. Legacy stores carried platformAuthors /
-      // platformAuthorMode (creators, accounts) or redditSubreddits /
-      // redditMode (Reddit); both are read once here and written back as
-      // sources / sourceMode.
-      const legacySources = group?.groupType === "reddit" ? group?.redditSubreddits : group?.platformAuthors;
-      const legacyMode = group?.groupType === "reddit" ? group?.redditMode : group?.platformAuthorMode;
-      // The legacy pair only exists in old stores and old-style patches, so when
-      // it is present it wins over a default-valued modern pair merged underneath.
-      const hasLegacy = Array.isArray(legacySources) || typeof legacyMode === "string";
-      const rawSources = hasLegacy
-        ? (Array.isArray(legacySources) ? legacySources : [])
-        : Array.isArray(group?.sources) ? group.sources : [];
-      const rawSourceMode = hasLegacy ? legacyMode : group?.sourceMode;
-      const rawDiscordTargets = Array.isArray(group?.discordTargets) ? group.discordTargets : [];
-
-      const normalizedGroupType = normalizeGroupType(group?.groupType);
-
-      const normalized = {
-        ...baseGroup,
-        id: typeof group?.id === "string" && group.id ? group.id : baseGroup.id,
-        name:
-          typeof group?.name === "string" && group.name.trim()
-            ? group.name.trim()
-            : `${baseGroup.name} ${index + 1}`,
-        // The group-level "allow" exception effect was removed (owner 2026-09-24:
-        // exceptions live in custom rules). A stored exception group must not
-        // silently turn into a blocking group, so it is kept but disabled.
-        enabled: Boolean(group?.enabled) && group?.effect !== "allow",
-        groupType: normalizedGroupType,
-        mode: normalizeBlockingMode(group?.mode),
-        allowedMinutes: parseAllowedMinutes(group?.allowedMinutes) ?? DEFAULT_ALLOWED_MINUTES,
-        resetIntervalHours:
-          parseResetIntervalHours(group?.resetIntervalHours) ?? DEFAULT_RESET_INTERVAL_HOURS,
-        resetAtMidnight: group?.resetAtMidnight === true,
-        rollingLimit: group?.rollingLimit === true,
-        allowSnooze: group?.allowSnooze !== false,
-        snoozeMinutes: parseSnoozeMinutes(group?.snoozeMinutes) ?? DEFAULT_SNOOZE_MINUTES,
-        snoozeActivationDelayMinutes:
-          parseSnoozeDelayMinutes(group?.snoozeActivationDelayMinutes) ??
-          DEFAULT_SNOOZE_ACTIVATION_DELAY_MINUTES,
-        snoozeCooldownMinutes:
-          parseSnoozeCooldownMinutes(group?.snoozeCooldownMinutes) ??
-          DEFAULT_SNOOZE_COOLDOWN_MINUTES,
-        snoozeConfirmations:
-          parseSnoozeConfirmations(group?.snoozeConfirmations) ?? DEFAULT_SNOOZE_CONFIRMATIONS,
-        activeDays: hasStoredDays ? activeDays : createDefaultDays(),
-        timeWindowsText: parseTimeWindowsText(rawTimeWindowsText).normalizedLines.join("\n"),
-        platformVideoMode: normalizeVideoMode(group?.platformVideoMode),
-        sourceMode: normalizeSourceMode(rawSourceMode, rawSources),
-        sources: [
-          ...new Set(
-            rawSources
-              .map((source) => normalizeSourceInput(source, normalizedGroupType))
-              .filter(Boolean)
-          )
-        ],
-        // Content-tag filter (platform rules): block by classifier tag.
-        platformTagMode: normalizeTagFilterMode(group?.platformTagMode),
-        platformTags: CBGroupScopes.normalizeTagList(group?.platformTags),
-        platformTagDefaultConfidence: clampTagConfidence(group?.platformTagDefaultConfidence, 4),
-        platformTagBlockUntagged: Boolean(group?.platformTagBlockUntagged),
-        platformTagEffect: group?.platformTagEffect === "block" ? "block" : "dim",
-        // A matching video's OWN page (watch/detail) blacks out its player in
-        // place. On unless explicitly turned off: feed-dim + page-block is the
-        // product default for content-tag blocking.
-        platformTagBlockPage: group?.platformTagBlockPage !== false,
-        // Optional (default off): cover taggable cards / the watch page while the
-        // classifier is still tagging, instead of leaving them visible until the
-        // tags arrive. Revealed when the tags settle and do not match.
-        platformTagCoverUntilTagged: group?.platformTagCoverUntilTagged === true,
-        discordTargets: [
-          ...new Set(
-            rawDiscordTargets
-              .map((target) => normalizeDiscordTargetInput(target))
-              .filter(Boolean)
-          )
-        ],
-        discordMode: normalizeDiscordMode(group?.discordMode, rawDiscordTargets),
-        surfaceHides: normalizeSurfaceHides(group?.surfaceHides, normalizedGroupType),
-        blockingRulesText:
-          typeof group?.blockingRulesText === "string" && group.blockingRulesText.trim()
-            ? group.blockingRulesText.trim()
-            : baseGroup.blockingRulesText,
-        // The lock: parallel gates (wait / PIN), see group-actions.js.
-        ...CBGroupActions.normalizeLock(group),
-        sites: Array.isArray(group?.sites)
-          ? [...new Set(group.sites.map(normalizeSiteInput).filter(Boolean))]
-          : [],
-        // See defaultGroup(): blocklist (false) vs "block all except" (true).
-        allowlist: Boolean(group?.allowlist),
-        blockHomePage: Boolean(group?.blockHomePage),
-        // The entry's page action (block | pause), read into its lines below.
-        pageAction: group?.pageAction === "pause" ? "pause" : "block",
-        // One field: a web address redirects the blocked tab there, any other
-        // text is shown on the cover, blank = the plain cover (cbBlockExit).
-        fallbackUrl: typeof group?.fallbackUrl === "string" ? group.fallbackUrl.trim() : "",
-        pauseSeconds: parsePauseSeconds(group?.pauseSeconds) ?? DEFAULT_PAUSE_SECONDS,
-        // Preserve custom-rule fields verbatim so that any path which
-        // eventually persists the sanitised group (e.g. getState() →
-        // applyRuntimeNormalizations() when changed=true) does not silently
-        // strip the user's saved source code, abort reason, or update
-        // timestamp. The defaults are deliberately empty / null so non-custom
-        // groups stay shape-compatible with the previous serialised form.
-        activeEventSource:
-          typeof group?.activeEventSource === "string" ? group.activeEventSource : "",
-        lastAbortReason:
-          typeof group?.lastAbortReason === "string" ? group.lastAbortReason : "",
-        lastSourceUpdatedAt:
-          Number.isFinite(Number(group?.lastSourceUpdatedAt)) &&
-          Number(group.lastSourceUpdatedAt) > 0
-            ? Number(group.lastSourceUpdatedAt)
-            : null
-      };
-      // Stored lines are validated as they are. A flat (form / legacy / MCP)
-      // patch describes ONE platform — the group's type — and replaces only
-      // that platform's lines; lines of the group's other platforms stay.
-      const storedLines = hasLines
-        ? CBGroupScopes.sanitizeScopeLines(input.scopes, normalizedGroupType, cbScopeNormalizers)
-        : [];
-      let scopes = useStoredLines
-        ? storedLines
-        : CBGroupScopes.mergeFlatIntoScopes(storedLines, normalized, normalizedGroupType);
-      // A website list patched onto a platform group edits its Websites entry
-      // (owner 2026-09-24): the flat `sites`/`allowlist` describe that entry.
-      if (!useStoredLines && CBGroupScopes.platformKind(normalizedGroupType) !== "site" && normalizedGroupType !== "custom"
-          && (Object.prototype.hasOwnProperty.call(input, "sites") || Object.prototype.hasOwnProperty.call(input, "allowlist"))) {
-        scopes = CBGroupScopes.mergeFlatIntoScopes(scopes, normalized, "site");
-      }
-      return {
-        ...CBGroupScopes.withoutFlatScopeFields(normalized),
-        groupType: CBGroupScopes.deriveGroupType(scopes, normalizedGroupType),
-        scopes
-      };
-    })
-    .filter((group) => group.name);
-}
 
 // ────────────────────────────────────────────────────────────────────────
 // Hostname helpers used by site/platform group evaluation.
@@ -2017,6 +1776,32 @@ async function cbSetTabCovered(tabId, covered) {
   } catch (_) {}
 }
 
+// A custom group's Snooze (the editor's button, or a tool): the rule's
+// snoozePress event, dispatched for the active tab so its logs show there.
+async function cbFireSnoozePress(groupId) {
+  let activeTab = null;
+  try {
+    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    activeTab = tabs && tabs[0] ? tabs[0] : null;
+  } catch (_) {}
+  const descriptor = {
+    type: "snoozePress",
+    tabId: activeTab && typeof activeTab.id === "number" ? activeTab.id : null,
+    pageId: null,
+    url: activeTab?.url || "",
+    hostname: hostnameOf(activeTab?.url || ""),
+    time: todayContext(),
+    data: { triggeredAt: Date.now() },
+    targetGroupId: groupId
+  };
+  const result = await dispatchToSandbox(descriptor);
+  ingestSandboxLogs(result, descriptor);
+  maybeQuarantineFromResult(result, descriptor);
+  if (typeof descriptor.tabId === "number") await applySandboxResultToTab(descriptor.tabId, result, descriptor);
+  await processLocalFileIntents(result, descriptor);
+  return result;
+}
+
 // The popup's snooze entry, built here for the cover's Snooze button. The
 // cover runs the group's confirmation steps itself; the worker stores the
 // entry, re-syncs blocking and shares it with linked members (newest start
@@ -3523,52 +3308,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "fire-snooze-press") {
-    // Pure notification event for custom groups. Handlers can log or
-    // run arbitrary code in response to the Start Snooze button but
-    // there's no programmatic snooze API. The dispatch is routed to
-    // the currently active tab so logs surface there as toasts.
+    // A custom group's Snooze: the rule's snoozePress event (the rule decides).
     (async () => {
       try {
         const groupId = String(message.groupId || "");
-        cbDebugLog("[CustomBlocker:trace] bg fire-snooze-press groupId:", groupId);
         if (!groupId) {
           sendResponse({ ok: false, error: "missing groupId" });
           return;
         }
-        let activeTab = null;
-        try {
-          const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-          activeTab = tabs && tabs[0] ? tabs[0] : null;
-        } catch (_) {}
-        cbDebugLog("[CustomBlocker:trace] bg activeTab:", activeTab && { id: activeTab.id, url: activeTab.url });
-        const descriptor = {
-          type: "snoozePress",
-          tabId: activeTab && typeof activeTab.id === "number" ? activeTab.id : null,
-          pageId: null,
-          url: normalizeUrlForEvents(activeTab?.url || ""),
-          hostname: hostnameOf(activeTab?.url || ""),
-          time: todayContext(),
-          data: { triggeredAt: Date.now() },
-          targetGroupId: groupId
-        };
-        cbDebugLog("[CustomBlocker:trace] bg → sandbox dispatch", descriptor);
-        const result = await dispatchToSandbox(descriptor);
-        cbDebugLog("[CustomBlocker:trace] bg ← sandbox result",
-          result && {
-            logs: result.logs?.length,
-            intents: result.intents?.length,
-            domOps: result.domOps?.length
-          },
-          "tabId:", descriptor.tabId);
-        ingestSandboxLogs(result, descriptor);
-        maybeQuarantineFromResult(result, descriptor);
-        if (typeof descriptor.tabId === "number") {
-          await applySandboxResultToTab(descriptor.tabId, result, descriptor);
-          cbDebugLog("[CustomBlocker:trace] bg routed result to tab", descriptor.tabId);
-        } else {
-          cbDebugWarn("[CustomBlocker:trace] bg has no active tab id — toast cannot render");
-        }
-        await processLocalFileIntents(result, descriptor);
+        const result = await cbFireSnoozePress(groupId);
         sendResponse({ ok: true, result });
       } catch (error) {
         cbDebugError("[CustomBlocker:trace] bg fire-snooze-press error", error);
@@ -4640,7 +4388,9 @@ const CB_BROWSER_REQUEST_OPERATIONS = Object.freeze([
   "settings-unlock-group",
   "settings-move-group",
   "settings-snooze-group",
-  "settings-end-snooze"
+  "settings-end-snooze",
+  "settings-set-lock-gates",
+  "settings-delete-all"
 ]);
 const CB_CLASSIFIER_SETTINGS_STORAGE_KEY = "vaultClassifierSettings";
 const CB_TAGGING_MODES = Object.freeze(["whenFiltering", "always", "paused"]);
@@ -4747,7 +4497,7 @@ async function cbUnlockGroupForTool(input) {
   const group = groups[index];
   const now = Date.now();
   const plan = CBGroupActions.unlockPlan(group, now);
-  if (plan.error) throw new Error(plan.waitUntilMs ? `strict-wait:${new Date(plan.waitUntilMs).toISOString()}` : plan.error);
+  if (plan.error) throw new Error(plan.waitUntilMs ? `wait-until:${new Date(plan.waitUntilMs).toISOString()}` : plan.error);
   const step = await cbToolConfirmation(`unlock:${group.id}`, plan.confirmations, group.lockVersion, input.confirm, now, async () => {
     if (!plan.needsPin) return undefined;
     const upgrade = await cbCheckPinForTool(group, input.pin);
@@ -4767,6 +4517,11 @@ async function cbSnoozeGroupForTool(input) {
   const { groups, groupSnoozes } = await getState();
   const group = groups.find((item) => item.id === input.id);
   if (!group) throw new Error("group-not-found");
+  // A custom group's Snooze is its rule's (owner 2026-09-27), as in the editor.
+  if (group.groupType === "custom") {
+    await cbFireSnoozePress(group.id);
+    return { snoozePressed: true };
+  }
   const now = Date.now();
   const plan = CBGroupActions.snoozePlan(group, groupSnoozes[group.id], now);
   if (plan.error) throw new Error(plan.error);
@@ -4792,6 +4547,54 @@ async function cbEndSnoozeForTool(input) {
 const CB_EDITOR_GLOBAL_FIELDS = Object.freeze(["defaultSnoozeMinutes", "quitRetryMinutes", "quickAddEnabled"]);
 function cbEditorGlobalSettings(settings) {
   return Object.fromEntries(CB_EDITOR_GLOBAL_FIELDS.map((key) => [key, settings[key]]));
+}
+
+// A browser tool edits no Apps lines (the desktop's; the browser editor shows
+// them read-only).
+function cbWithoutAppLines(patch) {
+  const { apps: _apps, appsAllowlist: _allow, ...rest } = patch;
+  if (Array.isArray(rest.scopes)) rest.scopes = rest.scopes.filter((line) => line && line.surface !== "apps");
+  return rest;
+}
+
+// The editor's lock gates on an unlocked group: the wait (hours) and the PIN.
+// Clearing a PIN takes the current one, as in the editor.
+async function cbSetLockGatesForTool(input) {
+  const { groups } = await getState();
+  const index = groups.findIndex((group) => group.id === input.id);
+  if (index < 0) throw new Error("group-not-found");
+  const group = groups[index];
+  const gates = {};
+  if (input.waitHours !== undefined) gates.waitHours = input.waitHours;
+  if (input.clearPin === true) {
+    if (CBGroupActions.hasPin(group)) await cbCheckPinForTool(group, input.pin);
+    gates.pinFields = null;
+  } else if (input.pin !== undefined) {
+    if (CBGroupActions.hasPin(group)) throw new Error("pin-already-set");
+    gates.pinFields = await CBParentalPin.newPinFields(String(input.pin));
+  }
+  const result = CBGroupActions.setGates(group, gates);
+  if (result.error) throw new Error(result.error);
+  return { group: cbPublicGroup(await cbWriteGroup(groups, index, result.group)) };
+}
+
+// "Delete all" through the editor's gates: no wait holding on any locked
+// group, each distinct PIN once, then the confirmation.
+async function cbDeleteAllForTool(input) {
+  const { groups } = await getState();
+  const now = Date.now();
+  const plan = CBGroupActions.deleteAllPlan(groups, now);
+  if (plan.error) throw new Error(plan.waitUntilMs ? `wait-until:${new Date(plan.waitUntilMs).toISOString()}` : plan.error);
+  // pins[i] is the PIN of the i-th distinct PIN (wrong ones count, as in the editor).
+  const pins = Array.isArray(input.pins) ? input.pins.map(String) : [];
+  if (pins.length < plan.pinGroups.length) throw new Error(`pins-required:${plan.pinGroups.map((g) => g.name).join(", ")}`);
+  for (const [i, group] of plan.pinGroups.entries()) await cbCheckPinForTool(group, pins[i]);
+  if (plan.needsConfirmation) {
+    const step = await cbToolConfirmation("delete-all", plan.confirmations, "delete-all", input.confirm, now);
+    if (!step.done) return { deleted: false, confirmationsLeft: step.left, confirmAfterSeconds: plan.intervalMs / 1000, next: CB_CONFIRM_NEXT };
+  }
+  await chrome.storage.local.set({ [BLOCKED_GROUPS_KEY]: [] });
+  return { deleted: groups.length };
 }
 
 async function cbBrowserRequestBody(operation, body) {
@@ -4831,7 +4634,9 @@ async function cbBrowserRequestBody(operation, body) {
         const root = base.name;
         base.name = CBGroupActions.freeName(groups, (n) => (n === 1 ? root : `${root} ${n}`));
       }
-      const draft = { ...base, ...safePatch, groupType };
+      const invalid = CBGroupActions.validateGroupPatch(safePatch, groupType);
+      if (invalid) throw new Error(invalid);
+      const draft = { ...base, ...cbWithoutAppLines(safePatch), groupType };
       const [group] = sanitizeGroups([draft]);
       if (!group) throw new Error("invalid-group");
       if (groups.some((existing) => existing.id === group.id)) throw new Error("duplicate-group-id");
@@ -4850,7 +4655,12 @@ async function cbBrowserRequestBody(operation, body) {
       if (cbGroupIsLocked(groups[index])) throw new Error("group-locked");
       // The id and the lock state are never patchable — same as the popup.
       const { id: _id, ...safePatch } = cbWithoutLockFields(patch);
-      const [group] = sanitizeGroups([{ ...groups[index], ...safePatch, id }]);
+      const invalid = CBGroupActions.validateGroupPatch(safePatch, safePatch.groupType ?? groups[index].groupType);
+      if (invalid) throw new Error(invalid);
+      // Apps lines are the desktop's (read-only in a browser, as in its editor).
+      const edit = cbWithoutAppLines(safePatch);
+      if (Array.isArray(edit.scopes)) edit.scopes = [...edit.scopes, ...groups[index].scopes.filter((line) => line.surface === "apps")];
+      const [group] = sanitizeGroups([{ ...groups[index], ...edit, id }]);
       if (!group) throw new Error("invalid-group");
       if (cbNameTaken(groups, group.name, id)) throw new Error("duplicate-name");
       const next = groups.slice();
@@ -4876,6 +4686,10 @@ async function cbBrowserRequestBody(operation, body) {
       return cbSnoozeGroupForTool({ ...input, id: typeof input.id === "string" ? input.id : "" });
     case "settings-end-snooze":
       return cbEndSnoozeForTool({ id: typeof input.id === "string" ? input.id : "" });
+    case "settings-set-lock-gates":
+      return cbSetLockGatesForTool({ ...input, id: typeof input.id === "string" ? input.id : "" });
+    case "settings-delete-all":
+      return cbDeleteAllForTool(input);
     case "settings-move-group": {
       // The group list's order (drag in the editor); a locked group stays put.
       // Order is this device's own: it is not shared with linked devices.
@@ -4916,11 +4730,18 @@ async function cbBrowserRequestBody(operation, body) {
       const current = stored?.[CB_GLOBAL_SETTINGS_KEY] && typeof stored[CB_GLOBAL_SETTINGS_KEY] === "object" ? stored[CB_GLOBAL_SETTINGS_KEY] : {};
       const patch = input.patch && typeof input.patch === "object" && !Array.isArray(input.patch) ? input.patch : null;
       if (!patch) throw new Error("missing-patch");
-      const unknown = Object.keys(patch).find((key) => !CB_EDITOR_GLOBAL_FIELDS.includes(key));
+      const { quickAddGroupId, ...settings } = patch;
+      const unknown = Object.keys(settings).find((key) => !CB_EDITOR_GLOBAL_FIELDS.includes(key));
       if (unknown) throw new Error(`not-an-editor-setting:${unknown}`);
-      const next = CBGroupActions.sanitizeGlobalSettings({ ...current, ...patch });
+      // The quick-add "+" target (the editor's badge): a group id, or "".
+      if (quickAddGroupId !== undefined) {
+        const target = String(quickAddGroupId || "");
+        if (target && !(await getState()).groups.some((group) => group.id === target)) throw new Error("group-not-found");
+        await chrome.storage.local.set({ [CB_QUICK_ADD_GROUP_KEY]: target });
+      }
+      const next = CBGroupActions.sanitizeGlobalSettings({ ...current, ...settings });
       await chrome.storage.local.set({ [CB_GLOBAL_SETTINGS_KEY]: next });
-      return { globalSettings: cbEditorGlobalSettings(next) };
+      return { globalSettings: cbEditorGlobalSettings(next), quickAddGroupId: (await chrome.storage.local.get({ [CB_QUICK_ADD_GROUP_KEY]: "" }))[CB_QUICK_ADD_GROUP_KEY] };
     }
     default:
       throw new Error("unsupported-operation");
