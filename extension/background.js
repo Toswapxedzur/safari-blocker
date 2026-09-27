@@ -1568,23 +1568,34 @@ async function runInstallMigrations(details) {
   }
 }
 
-// After an update the old pages keep their covers, and the tabs the old
-// worker muted stay muted: adopt those (Chrome names the extension that muted
-// a tab) so the next load or lift unmutes them.
-async function cbAdoptMutedTabs() {
+// After an update the old pages' content scripts are gone (their covers can no
+// longer snooze or lift): every blocked tab is reloaded, so the new extension
+// decides it again (owner 2026-09-27). A tab the old worker muted (Chrome names
+// the extension that muted it) was covered, so it is reloaded too, and adopted
+// so the new load unmutes it.
+async function cbReloadBlockedTabsAfterUpdate() {
   await cbCoverStateReady;
   const tabs = await chrome.tabs.query({});
+  const { groups, usageTimersMs, groupSnoozes } = await getState();
+  const now = Date.now();
   let adopted = false;
   for (const tab of tabs) {
-    const info = tab?.mutedInfo;
-    if (typeof tab?.id !== "number" || !info?.muted || info.reason !== "extension" || info.extensionId !== chrome.runtime.id) continue;
-    if (!cbMutedTabs.has(tab.id)) { cbMutedTabs.add(tab.id); adopted = true; }
+    if (typeof tab?.id !== "number" || !/^https?:/i.test(tab.url || "")) continue;
+    const info = tab.mutedInfo;
+    const mutedByUs = Boolean(info?.muted && info.reason === "extension" && info.extensionId === chrome.runtime.id);
+    if (mutedByUs && !cbMutedTabs.has(tab.id)) { cbMutedTabs.add(tab.id); adopted = true; }
+    let blocked = false;
+    try {
+      const url = new URL(tab.url);
+      blocked = Boolean(cbPageLead(normalizePageContext({ url: url.href, hostname: url.hostname, pathname: url.pathname }), groups, usageTimersMs, groupSnoozes, now));
+    } catch (_) {}
+    if (blocked || mutedByUs) chrome.tabs.reload(tab.id).catch(() => {});
   }
   if (adopted) cbSaveCoverState();
 }
 
 chrome.runtime.onInstalled.addListener((details) => {
-  if (details?.reason === "update") cbAdoptMutedTabs().catch(() => {});
+  if (details?.reason === "update") cbReloadBlockedTabsAfterUpdate().catch(() => {});
   // Migrations run first so the transition alarm sees the post-migration
   // groups.
   runInstallMigrations(details)
@@ -2041,7 +2052,7 @@ function cbShareSnooze(group, entry, now) {
     cbConnection.sendWS({
       kind: "group-sync",
       program: cbDetectProgramId(),
-      groupName: group.name,
+      groupId: group.id,
       ts: now,
       snooze: entry,
       snoozeTs: CBGroupActions.snoozeChangedAtMs(entry)
@@ -3291,6 +3302,8 @@ async function handleCommittedWebNavigation(details, transition = "commit") {
   // Skip no-op history replaces (identical URL) so frequent replaceState calls
   // don't spam webChangedEvent; genuine reloads still arrive via onCommitted.
   if (transition === "history" && previous && previousUrl === nextUrl) return;
+  // The page's one navigation signal: its address changed without a load.
+  if (transition === "history") trySendApply(tabId, { type: "page-navigated" }).catch(() => {});
 
   previousTabUrls.set(tabId, { url: nextUrl, hostname: nextHost });
   scheduleSessionFlush();
@@ -3330,10 +3343,11 @@ if (chrome.webNavigation && chrome.webNavigation.onCommitted) {
   });
 }
 
-// In-page navigations (history.pushState/replaceState) — required so SPA route
-// changes (e.g. YouTube home → /shorts/...) emit webChangedEvent too.
-if (chrome.webNavigation && chrome.webNavigation.onHistoryStateUpdated) {
-  chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+// In-page navigations (history API, a new #hash) — so single-page app route
+// changes (e.g. YouTube home → /shorts/...) reach the rules and the page.
+for (const event of ["onHistoryStateUpdated", "onReferenceFragmentUpdated"]) {
+  if (!chrome.webNavigation || !chrome.webNavigation[event]) continue;
+  chrome.webNavigation[event].addListener((details) => {
     handleCommittedWebNavigation(details, "history").catch((error) => {
       try { console.warn("[CustomBlocker] history navigation dispatch failed", error); } catch (_) {}
     });
@@ -3701,6 +3715,12 @@ const cbNameTaken = CBGroupActions.nameTaken;
 // (CBGroupActions.budgetRestarts), and a deleted group leaves no per-group
 // entry behind — whoever changed the list (the editor, a tool, a link).
 async function cbApplyStoredGroupChange(oldValue, newValue) {
+  // Duplicate names are renamed silently; a linked group keeps its name.
+  const renamed = CBGroupActions.dedupeNames(Array.isArray(newValue) ? newValue : [], [...cbLinkedGroupIds(cbClusterCopy)]);
+  if (renamed) {
+    await chrome.storage.local.set({ [BLOCKED_GROUPS_KEY]: renamed });
+    return;
+  }
   const before = new Map((Array.isArray(oldValue) ? oldValue : []).filter((g) => g && g.id).map((g) => [g.id, g]));
   const after = (Array.isArray(newValue) ? newValue : []).filter((g) => g && g.id);
   const present = new Set(after.map((g) => g.id));
@@ -3767,7 +3787,7 @@ function cbSendDefinition(group, ts) {
   cbConnection.sendWS({
     kind: "group-sync",
     program: cbDetectProgramId(),
-    groupName: group.name,
+    groupId: group.id,
     ts,
     scalars,
     scopes: group.scopes,
@@ -3802,7 +3822,7 @@ function cbShareStoredSnoozes(value) {
     const member = (cluster?.members || []).find((m) => m && m.program === program);
     const entry = member?.groupId ? snoozes[member.groupId] : null;
     if (!entry || CBGroupActions.snoozeChangedAtMs(entry) <= (Number(cluster.shared?.snoozeTs) || 0)) continue;
-    cbShareSnooze({ name: cluster.groupName }, entry, Date.now());
+    cbShareSnooze({ id: member.groupId }, entry, Date.now());
   }
 }
 
@@ -3872,10 +3892,39 @@ let cbClusterCopy = [];
 })();
 
 function cbSaveClusterCopy(clusters) {
+  const before = cbLinkedGroupIds(cbClusterCopy);
   cbClusterCopy = Array.isArray(clusters) ? clusters : [];
+  const now = cbLinkedGroupIds(cbClusterCopy);
+  const left = [...before].filter((id) => !now.has(id));
+  if (left.length) cbKeepOwnLines(left).catch(() => {});
   try {
     chrome.storage.local.set({ [CB_CLUSTER_COPY_KEY]: cbClusterCopy.map((c) => ({ id: c.id, groupName: c.groupName, members: c.members })) }).catch(() => {});
   } catch (_) {}
+}
+
+// This browser's groups in the given links.
+function cbLinkedGroupIds(clusters) {
+  const program = cbDetectProgramId();
+  const ids = new Set();
+  for (const cluster of Array.isArray(clusters) ? clusters : []) {
+    for (const member of cluster?.members || []) if (member && member.program === program && member.groupId) ids.add(member.groupId);
+  }
+  return ids;
+}
+
+// A group that left a link (Unlink, or its link dissolved) keeps the shared
+// settings and only its own program's lines: a browser drops the Apps lines
+// (owner 2026-09-27).
+async function cbKeepOwnLines(ids) {
+  const stored = (await chrome.storage.local.get({ [BLOCKED_GROUPS_KEY]: [] }))[BLOCKED_GROUPS_KEY];
+  const groups = Array.isArray(stored) ? stored : [];
+  let changed = false;
+  const next = groups.map((group) => {
+    if (!group || !ids.includes(group.id) || !Array.isArray(group.scopes) || !group.scopes.some((line) => line.surface === "apps")) return group;
+    changed = true;
+    return { ...group, scopes: group.scopes.filter((line) => line.surface !== "apps") };
+  });
+  if (changed) await chrome.storage.local.set({ [BLOCKED_GROUPS_KEY]: next });
 }
 
 // Linked (per the copy), whether or not the hub is reachable right now.
@@ -3919,7 +3968,7 @@ async function cbHandOverOfflineUsage(groupsByCluster) {
     cbConnection.sendWS({
       kind: "group-sync",
       program,
-      groupName: group.name,
+      groupId: group.id,
       usageResetAtMs: 0,
       ...(group.rollingLimit
         ? { usageBuckets: entry.buckets }
@@ -3979,7 +4028,7 @@ function cbReportClusterUsage(groups, timers, resets, bucketDeltas = {}, buckets
         cbConnection.sendWS({
           kind: "group-sync",
           program,
-          groupName: g.name,
+          groupId: g.id,
           usageResetAtMs: 0,
           ...(seeded ? { usageBuckets: deltas } : { usageBucketsSeed: buckets[g.id] ?? {} }),
           ts: Date.now()
@@ -3998,7 +4047,7 @@ function cbReportClusterUsage(groups, timers, resets, bucketDeltas = {}, buckets
       cbConnection.sendWS({
         kind: "group-sync",
         program,
-        groupName: g.name,
+        groupId: g.id,
         usageDeltaMs: delta,
         usageMs: current,
         usageResetAtMs: resetAt,
@@ -4029,6 +4078,8 @@ const cbConnection = {
   // a reconnect even if the popup is closed.
   clusters: [],
   lastAnnounce: null,
+  // Every program's groups (id, name, frozen), for the editor's Link picker.
+  rosters: {},
   // Rapid-retry burst bookkeeping. burstStartMs marks the start of the current
   // retry window. A raw WebSocket open is not a usable connection: the hub
   // must also accept our protocol hello with a welcome message.
@@ -4099,7 +4150,7 @@ const cbConnection = {
   broadcastClusters() {
     try {
       chrome.runtime
-        .sendMessage({ type: "clusters-push", clusters: this.clusters })
+        .sendMessage({ type: "clusters-push", clusters: this.clusters, rosters: this.rosters })
         .catch(() => {});
     } catch (_) {}
   },
@@ -4478,9 +4529,17 @@ const cbConnection = {
       case "peers":
         this.setStatus({ peers: Array.isArray(msg.peers) ? msg.peers : [] });
         break;
+      case "rosters":
+        this.rosters = msg.rosters && typeof msg.rosters === "object" ? msg.rosters : {};
+        this.broadcastClusters();
+        break;
+      case "link-refused":
+        try { chrome.runtime.sendMessage({ type: "link-refused", reason: String(msg.reason || ""), groupId: String(msg.groupId || "") }).catch(() => {}); } catch (_) {}
+        break;
       case "clusters":
         if (!this.routeIsReady("macapp")) break;
         this.clusters = Array.isArray(msg.clusters) ? msg.clusters : [];
+        if (msg.rosters && typeof msg.rosters === "object") this.rosters = msg.rosters;
         cbSaveClusterCopy(this.clusters);
         this.broadcastClusters();
         this.applySharedToStorage().then(() => cbContributeJoins()).catch(() => {});
@@ -5123,7 +5182,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: true, status: cbConnection.statusForTarget("macapp") });
       return false;
     case "clusters-status":
-      sendResponse({ ok: true, clusters: cbConnection.clusters });
+      sendResponse({ ok: true, clusters: cbConnection.clusters, rosters: cbConnection.rosters || {} });
+      return false;
+    // The editor's Link / Unlink buttons (owner 2026-09-27: links are made by
+    // the user, never by names).
+    case "group-link":
+    case "group-unlink":
+      if (!cbConnection.routeIsReady("macapp")) { sendResponse({ ok: false, error: "macapp-unavailable" }); return false; }
+      cbConnection.sendWS(message.type === "group-link"
+        ? { kind: "group-link", groupId: String(message.groupId || ""), targetProgram: String(message.targetProgram || ""), targetGroupId: String(message.targetGroupId || "") }
+        : { kind: "group-unlink", groupId: String(message.groupId || "") });
+      sendResponse({ ok: true });
       return false;
     default:
       return false;
