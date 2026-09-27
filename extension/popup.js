@@ -418,6 +418,8 @@ const state = {
   manualCache: {},
   // The worker's copy of this browser's links (cbClusterCopy), for isEnforceOnly.
   linkCopy: [],
+  // Every program's groups ({program: [{id, name, frozen}]}), for the Link picker.
+  linkRosters: {},
   nameEditing: null,
   panelWidth: 300,
   aiPromptGroupId: null,
@@ -925,8 +927,13 @@ function isUserEditing() {
   return Boolean(active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT"));
 }
 
-function applyClusters(list) {
+function applyClusters(list, rosters) {
   const incoming = Array.isArray(list) ? list : Array.isArray(list?.clusters) ? list.clusters : [];
+  const nextRosters = rosters ?? list?.rosters;
+  if (nextRosters && typeof nextRosters === "object" && JSON.stringify(nextRosters) !== JSON.stringify(state.linkRosters)) {
+    state.linkRosters = nextRosters;
+    state.clustersLastJSON = "";
+  }
   const incomingJSON = JSON.stringify(incoming);
   if (incomingJSON === state.clustersLastJSON) return;
   state.clustersLastJSON = incomingJSON;
@@ -966,12 +973,116 @@ window.__cbClustersState = function (json) {
   } catch (_) {}
 };
 
+// ── Link / Unlink (owner 2026-09-27: links are made by the user, never by
+// names). A group links with a group of another program; the link shares the
+// whole definition and the name. On unlink both keep the settings and each
+// keeps its own program's lines. The service worker / Mac Vault carry it out.
+const groupLinkSection = document.getElementById("groupLinkSection");
+const groupLinkStatus = document.getElementById("groupLinkStatus");
+const groupLinkTarget = document.getElementById("groupLinkTarget");
+const groupLinkButton = document.getElementById("groupLinkButton");
+const groupUnlinkButton = document.getElementById("groupUnlinkButton");
+
+function programLabel(program) {
+  const labels = { macapp: "Mac Vault", windowsapp: "Windows Vault", chrome: "Chrome", edge: "Edge", firefox: "Firefox", opera: "Opera", safari: "Safari" };
+  return labels[program] || program;
+}
+
+// Groups of other programs that are in no link yet.
+function linkCandidates() {
+  const linked = new Set();
+  for (const cluster of state.clusters || []) {
+    for (const member of cluster?.members || []) if (member?.groupId) linked.add(`${member.program}␟${member.groupId}`);
+  }
+  const out = [];
+  for (const [program, groups] of Object.entries(state.linkRosters || {})) {
+    if (program === LOCAL_PROGRAM_ID || program === "classifier") continue;
+    for (const entry of Array.isArray(groups) ? groups : []) {
+      if (!entry?.id || entry.frozen || linked.has(`${program}␟${entry.id}`)) continue;
+      out.push({ program, id: entry.id, name: entry.name || "" });
+    }
+  }
+  return out;
+}
+
+function renderLinkSection(group, editable) {
+  if (!groupLinkSection) return;
+  const cluster = groupConnectionCluster(group);
+  const hubOnline = bridgeIsOnline() && !macVaultAway();
+  if (cluster) {
+    const others = (cluster.members || []).filter((m) => m && m.program !== LOCAL_PROGRAM_ID);
+    groupLinkStatus.textContent = t("link.linkedWith", {
+      names: others.map((m) => t("link.candidate", { name: cluster.groupName, program: programLabel(m.program) })).join(", ")
+    });
+    groupLinkTarget.classList.add("hidden");
+    groupLinkButton.classList.add("hidden");
+    groupUnlinkButton.classList.remove("hidden");
+    groupUnlinkButton.disabled = !editable || !hubOnline;
+    return;
+  }
+  const candidates = linkCandidates();
+  groupLinkStatus.textContent = t(candidates.length > 0 || !hubOnline ? "link.none" : "link.noCandidates");
+  const current = groupLinkTarget.value;
+  groupLinkTarget.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = t("link.pickPlaceholder");
+  groupLinkTarget.appendChild(placeholder);
+  for (const candidate of candidates) {
+    const option = document.createElement("option");
+    option.value = `${candidate.program}␟${candidate.id}`;
+    option.textContent = t("link.candidate", { name: candidate.name, program: programLabel(candidate.program) });
+    groupLinkTarget.appendChild(option);
+  }
+  if ([...groupLinkTarget.options].some((o) => o.value === current)) groupLinkTarget.value = current;
+  groupLinkTarget.classList.remove("hidden");
+  groupLinkButton.classList.remove("hidden");
+  groupUnlinkButton.classList.add("hidden");
+  groupLinkTarget.disabled = !editable || !hubOnline || candidates.length === 0;
+  groupLinkButton.disabled = groupLinkTarget.disabled || !groupLinkTarget.value;
+}
+
+function showLinkRefusal(reason) {
+  const key = `link.refused.${String(reason || "")}`;
+  const text = t(key);
+  setStatus(text && text !== key ? text : t("link.refused.generic"), true);
+}
+
+// The Mac editor's native host reports a refused link here.
+window.__cbLinkRefused = showLinkRefusal;
+
+async function sendLinkRequest(message) {
+  try {
+    const response = await chrome.runtime.sendMessage(message);
+    if (response && response.ok === false) showLinkRefusal(response.error);
+  } catch (_) {
+    showLinkRefusal("macapp-unavailable");
+  }
+}
+
+if (groupLinkTarget) {
+  groupLinkTarget.addEventListener("change", () => {
+    groupLinkButton.disabled = groupLinkTarget.disabled || !groupLinkTarget.value;
+  });
+  groupLinkButton.addEventListener("click", () => {
+    const group = getSelectedGroup();
+    const [targetProgram, targetGroupId] = String(groupLinkTarget.value || "").split("␟");
+    if (!group || !targetProgram || !targetGroupId) return;
+    void sendLinkRequest({ type: "group-link", groupId: group.id, targetProgram, targetGroupId });
+  });
+  groupUnlinkButton.addEventListener("click", () => {
+    const group = getSelectedGroup();
+    if (!group) return;
+    void sendLinkRequest({ type: "group-unlink", groupId: group.id });
+  });
+}
+
 function requestClusters() {
   try {
     chrome.runtime
       .sendMessage({ type: "clusters-status" })
       .then((res) => {
-        if (res && res.clusters) applyClusters(res.clusters);
+        if (res && res.clusters) applyClusters(res.clusters, res.rosters);
       })
       .catch(() => {});
   } catch (_) {}
@@ -4200,6 +4311,7 @@ function renderEditor(now = Date.now()) {
   refreshChipField(platformAuthorsField);
   refreshChipField(discordTargetsField);
   deleteGroupButton.disabled = !editable;
+  renderLinkSection(group, editable);
   exportGroupButton.disabled = false;
   importGroupButton.disabled = !editable;
   platformBlockHomePageField.disabled = !editable || !usesAuthorAxis;
@@ -4506,6 +4618,21 @@ async function persistGroups(ids, { reorder = false, message = "" } = {}) {
   state.storedGroups = list;
   await chrome.storage.local.set({ [BLOCKED_GROUPS_KEY]: list });
   if (message) setStatus(message);
+}
+
+// Clears one group's usage, snooze and snooze total (only that group's entries).
+async function resetGroupRuntime(groupId) {
+  const keys = [USAGE_TIMERS_KEY, USAGE_RESET_AT_KEY, USAGE_BUCKETS_KEY, GROUP_SNOOZES_KEY, GROUP_SNOOZE_TOTALS_KEY];
+  const stored = await chrome.storage.local.get(keys);
+  const writes = {};
+  for (const key of keys) {
+    const map = { ...(stored[key] && typeof stored[key] === "object" ? stored[key] : {}) };
+    if (key === USAGE_TIMERS_KEY || key === GROUP_SNOOZE_TOTALS_KEY) map[groupId] = 0;
+    else if (key === USAGE_RESET_AT_KEY) map[groupId] = Date.now();
+    else delete map[groupId];
+    writes[key] = map;
+  }
+  await chrome.storage.local.set(writes);
 }
 
 // A snooze entry the user started or ended here; the service worker / Mac
@@ -4931,6 +5058,8 @@ async function importIntoSelectedGroup() {
     delete state.drafts[group.id];
 
     await persistGroups([group.id], { message: t("status.importedGroup", { name: replacementGroup.name }) });
+    // An imported group starts fresh (owner 2026-09-27): no time used, no snooze.
+    await resetGroupRuntime(group.id);
     render();
   } catch (error) {
     console.error("Failed to import block group.", error);
@@ -6826,7 +6955,11 @@ if (chrome.runtime && chrome.runtime.onMessage) {
       return;
     }
     if (message.type === "clusters-push") {
-      applyClusters(message.clusters);
+      applyClusters(message.clusters, message.rosters);
+      return;
+    }
+    if (message.type === "link-refused") {
+      showLinkRefusal(message.reason);
       return;
     }
   });
