@@ -6,9 +6,9 @@ app.
 
 Safari splits the responsibility:
 
-- **Default + platform groups** run entirely in the extension — native URL
-  blocking via `declarativeNetRequest`, and per-platform feed hiding / overlays
-  via the content scripts. No native dependency.
+- **Site and platform groups** run entirely in the extension — the in-place
+  page cover, feed hiding and overlays via the content scripts. No native
+  dependency.
 - **Custom (JavaScript) groups** run as a **thin client**. Safari has no
   `chrome.offscreen`, and its support for the eval-relaxing manifest `sandbox`
   key is unreliable, so the extension forwards each custom-rule
@@ -68,8 +68,8 @@ one App Group.
 
 ## What does not survive on Safari
 
-- The **local-folder** helper (File System Access API) — browser-only; returns
-  `local-folder-not-available` in native mode.
+- A rule's local folder (`v.file`, File System Access API) — browser-only;
+  answers `local-folder-not-available` in native mode.
 - iOS Safari background persistence is weak; treat scheduled enforcement there
-  as best-effort. For real system-wide enforcement on Apple devices, use
-  macosBlocker's Screen Time path, not the Safari extension.
+  as best-effort. Apps on a Mac are Mac Vault's to block, not the Safari
+  extension's.
