@@ -2025,7 +2025,9 @@ async function loadCustomGroupSource(group, { state = null } = {}) {
       // A rule that didn't load leaves the one before it running.
       if (result.ok) {
         cbRuleTypes.set(group.id, new Set(Array.isArray(result.types) ? result.types : []));
-        cbSetRulePanels(group.id, Array.isArray(result.panels) ? result.panels : []);
+        // Run starts the panels over; a reload of the same rule (a restarted
+        // worker) keeps the ones on screen until the rule changes them.
+        if (state || !cbRulePanels.has(group.id)) cbSetRulePanels(group.id, Array.isArray(result.panels) ? result.panels : []);
         if (cbRuleTypes.get(group.id).has("items")) cbRuleItemsEpoch += 1;
       }
     }
@@ -2435,6 +2437,10 @@ for (const event of ["onHistoryStateUpdated", "onReferenceFragmentUpdated"]) {
 }
 
 // The rules' "tick", every second (offscreen.js drives it): the open tabs.
+// Safari has no offscreen document to ping every second: its background
+// page ticks the rules itself while it runs.
+if (sandboxTransportMode() === "native") setInterval(() => { emitRuleTick().catch(() => {}); }, 1000);
+
 async function emitRuleTick() {
   if (!cbRulesHandle("tick")) return;
   const tabs = await chrome.tabs.query({});
