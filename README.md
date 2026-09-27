@@ -13,10 +13,11 @@ Safari splits the responsibility:
   `chrome.offscreen`, and its support for the eval-relaxing manifest `sandbox`
   key is unreliable, so the extension forwards each custom-rule
   `event-sandbox-request` to the **macosBlocker** app over native messaging.
-  The app runs the *verbatim* engine (`helpers.js` + `event-sandbox.js`) in
+  The app runs the *verbatim* engine (`rule-core.js` + `event-sandbox.js`) in
   JavaScriptCore — which has no CSP, so `new Function` just works — and returns
-  the same result the in-browser sandbox would, including DOM/redirect intents
-  that the content script then applies.
+  the same result the in-browser sandbox would: the rule's browser actions
+  (items, cover, go, close, css, dom), which the Safari extension carries out.
+  Mac Vault only hosts this engine; its own rules control apps only.
 
 ```text
 Safari content script ──► Safari background (CB_SANDBOX_TRANSPORT="native")
@@ -27,10 +28,10 @@ Safari content script ──► Safari background (CB_SANDBOX_TRANSPORT="native"
                               │
                               ▼
                        SafariCustomRuleBridge (MacBlockerCore)
-                       JavaScriptCore + helpers.js + event-sandbox.js
-                              │  { ok, result: { …, intents } }
+                       JavaScriptCore + rule-core.js + event-sandbox.js
+                              │  { ok, actions, logs, panels, states }
                               ▼
-                       reply ──► content script applies intents
+                       reply ──► the worker / content script act on it
 ```
 
 ## How the pieces map across the repo
@@ -44,12 +45,12 @@ Safari content script ──► Safari background (CB_SANDBOX_TRANSPORT="native"
 | Packaging (`--target safari`) | `customBlocker/tools/package.py` |
 | Native message endpoint | `macosBlocker/XcodeScaffold/macosBlockerSafariExtension/SafariWebExtensionHandler.swift` |
 | Native engine host (JSC) | `macosBlocker/Sources/MacBlockerCore/SafariCustomRuleBridge.swift` |
-| Verbatim engine resources | `macosBlocker/Sources/MacBlockerCore/Resources/{helpers,event-sandbox}.js` |
+| Verbatim engine resources | `macosBlocker/Sources/MacBlockerCore/Resources/{rule-core,event-sandbox}.js` |
 
 ## Build
 
 ```bash
-./sync-engine.sh   # only if helpers.js / event-sandbox.js changed in customBlocker
+./sync-engine.sh   # only if rule-core.js / event-sandbox.js changed in customBlocker
 ./build.sh         # packages the safari target and unpacks it into ./extension
 ```
 
