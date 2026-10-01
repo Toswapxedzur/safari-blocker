@@ -12,3 +12,5 @@
 - **No automated tests** here; the engine is covered by customBlocker's suite and macosBlocker's Swift tests.
 
 - **English preparation (2026-10-01):** Generated editor is refreshed from the accepted shared browser code, including English terminology and the current custom-rule manual. No hand edits to extension/.
+
+- **Info explanations (2026-10-01):** English Info assets and source annotations are generated through the shared browser package; non-English layouts keep inline help.
