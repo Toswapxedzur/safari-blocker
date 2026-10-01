@@ -14,3 +14,5 @@
 - **English preparation (2026-10-01):** Generated editor is refreshed from the accepted shared browser code, including English terminology and the current custom-rule manual. No hand edits to extension/.
 
 - **Info explanations (2026-10-01):** English Info assets and source annotations are generated through the shared browser package; non-English layouts keep inline help.
+
+- **Field Info (2026-10-02):** 14px blue-gray icons retain a 24px invisible hit area. English field explanations are explicit; built-in settings, names, switches, searches and picker fields use the shared component. Other locales retain inline help.
