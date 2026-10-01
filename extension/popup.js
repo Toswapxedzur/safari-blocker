@@ -78,6 +78,8 @@ const cbDialog = (function () {
       card.className = "vui-dialog";
       card.setAttribute("role", opts.kind === "alert" ? "alertdialog" : "dialog");
       card.setAttribute("aria-modal", "true");
+      card.setAttribute("aria-label", opts.title || opts.message || opts.confirmText || "Dialog");
+      const opener = document.activeElement;
 
       if (opts.title) {
         const title = document.createElement("h3");
@@ -124,7 +126,9 @@ const cbDialog = (function () {
 
       function done(result) {
         document.removeEventListener("keydown", onKey, true);
+        releaseFocus(false);
         overlay.remove();
+        if (opener?.isConnected) opener.focus({ preventScroll: true });
         resolve(result);
       }
       function onOk() {
@@ -134,8 +138,7 @@ const cbDialog = (function () {
       }
       function onCancel() { done(opts.kind === "prompt" ? null : opts.kind === "confirm" ? false : undefined); }
       function onKey(e) {
-        if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onCancel(); }
-        else if (e.key === "Enter") { e.preventDefault(); onOk(); }
+        if (e.key === "Enter" && e.target === input) { e.preventDefault(); onOk(); }
       }
 
       okBtn.addEventListener("click", onOk);
@@ -143,7 +146,7 @@ const cbDialog = (function () {
       overlay.addEventListener("click", function (e) { if (e.target === overlay) onCancel(); });
       document.addEventListener("keydown", onKey, true);
 
-      (input || okBtn).focus();
+      const releaseFocus = VaultUI.focusDialog(card, { initialFocus: input || okBtn, onEscape: onCancel });
       if (input) input.select();
     });
   }
@@ -359,7 +362,6 @@ const manualCloseButton = document.getElementById("manualCloseButton");
 const settingsButton = document.getElementById("settingsButton");
 const settingsModal = document.getElementById("settingsModal");
 const settingsCloseButton = document.getElementById("settingsCloseButton");
-const settingsDefaultSnoozeMinutesField = document.getElementById("settingsDefaultSnoozeMinutes");
 const settingsQuitRetryMinutesField = document.getElementById("settingsQuitRetryMinutes");
 const settingsQuickAddField = document.getElementById("settingsQuickAdd");
 const localFolderChooseButton = document.getElementById("localFolderChooseButton");
@@ -368,8 +370,6 @@ const localFolderStatus = document.getElementById("localFolderStatus");
 let localFolderHandle = null;
 const settingsResetButton = document.getElementById("settingsResetButton");
 const settingsStatus = document.getElementById("settingsStatus");
-const classifierCollectionToggle = document.getElementById("classifierCollectionToggle");
-const classifierTaggingModeField = document.getElementById("classifierTaggingMode");
 const dayCheckboxes = Array.from(daysGrid.querySelectorAll('input[type="checkbox"]'));
 
 const state = {
@@ -418,53 +418,6 @@ const state = {
   clustersLastJSON: "",
   quickAddGroupId: ""
 };
-
-// This remains separate from the group-sync connection. Its browser evidence
-// requests share the public broker but never receive a group definition.
-const CLASSIFIER_BRIDGE_SETTINGS_KEY = "vaultClassifierSettings";
-const CLASSIFIER_TAGGING_MODES = ["whenFiltering", "always", "paused"];
-const DEFAULT_CLASSIFIER_BRIDGE_SETTINGS = Object.freeze({
-  collectionEnabled: true,
-  taggingMode: "whenFiltering"
-});
-let classifierBridgeSettings = { ...DEFAULT_CLASSIFIER_BRIDGE_SETTINGS };
-
-function sanitizeClassifierBridgeSettings(raw) {
-  return {
-    // Existing deliberate opt-outs stay off; new extension settings collect by
-    // default once the matching local app platform is enabled.
-    collectionEnabled: !raw || raw.collectionEnabled !== false,
-    taggingMode: raw && CLASSIFIER_TAGGING_MODES.includes(raw.taggingMode) ? raw.taggingMode : "whenFiltering"
-  };
-}
-
-function classifierBridgeStorageGet() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get([CLASSIFIER_BRIDGE_SETTINGS_KEY], (result) => {
-      resolve(sanitizeClassifierBridgeSettings(result && result[CLASSIFIER_BRIDGE_SETTINGS_KEY]));
-    });
-  });
-}
-
-function classifierBridgeStorageSet(next) {
-  classifierBridgeSettings = sanitizeClassifierBridgeSettings(next);
-  return new Promise((resolve, reject) => {
-    chrome.storage.local.set({ [CLASSIFIER_BRIDGE_SETTINGS_KEY]: classifierBridgeSettings }, () => {
-      const error = chrome.runtime.lastError;
-      error ? reject(new Error(error.message)) : resolve(classifierBridgeSettings);
-    });
-  });
-}
-
-function renderClassifierBridgeSettings() {
-  if (classifierCollectionToggle) classifierCollectionToggle.checked = classifierBridgeSettings.collectionEnabled;
-  if (classifierTaggingModeField) classifierTaggingModeField.value = classifierBridgeSettings.taggingMode;
-}
-
-async function loadClassifierBridgeSettings() {
-  classifierBridgeSettings = await classifierBridgeStorageGet();
-  renderClassifierBridgeSettings();
-}
 
 function getAiPromptStorageKey(groupId) {
   return `${AI_PROMPT_STORAGE_PREFIX}${groupId}`;
@@ -612,9 +565,21 @@ async function loadManualContent() {
   }
 }
 
+// Each modal owns one focus lifecycle; timer/state updates never re-open it.
+const modalFocusReleases = new Map();
+function focusVaultModal(modal, initialFocus, onEscape) {
+  if (modalFocusReleases.has(modal)) return;
+  modalFocusReleases.set(modal, VaultUI.focusDialog(modal.querySelector(".modal-card"), { initialFocus, onEscape }));
+}
+function releaseVaultModal(modal) {
+  modalFocusReleases.get(modal)?.();
+  modalFocusReleases.delete(modal);
+}
+
 function openManual() {
   state.isManualOpen = true;
   manualModal.classList.remove("hidden");
+  focusVaultModal(manualModal, manualCloseButton, closeManual);
   loadManualContent().catch((error) => {
     manualStatus.textContent = error?.message || t("manual.error");
   });
@@ -623,6 +588,7 @@ function openManual() {
 function closeManual() {
   state.isManualOpen = false;
   manualModal.classList.add("hidden");
+  releaseVaultModal(manualModal);
 }
 
 function openLocalFolderDb() {
@@ -1041,7 +1007,6 @@ function requestClusters() {
 
 function syncSettingsFormFromState() {
   const s = state.globalSettings || DEFAULT_GLOBAL_SETTINGS;
-  if (settingsDefaultSnoozeMinutesField) settingsDefaultSnoozeMinutesField.value = String(s.defaultSnoozeMinutes);
   if (settingsQuickAddField) settingsQuickAddField.checked = s.quickAddEnabled === true;
   if (settingsQuitRetryMinutesField) settingsQuitRetryMinutesField.value = String(s.quitRetryMinutes ?? 0);
   if (settingsStatus) settingsStatus.textContent = "";
@@ -1050,8 +1015,8 @@ function syncSettingsFormFromState() {
 function openSettings() {
   state.isSettingsOpen = true;
   syncSettingsFormFromState();
-  loadClassifierBridgeSettings().catch(() => renderClassifierBridgeSettings());
   settingsModal.classList.remove("hidden");
+  focusVaultModal(settingsModal, settingsCloseButton, closeSettings);
   renderLocalFolderStatus().catch((error) => {
     if (localFolderStatus) localFolderStatus.textContent = String(error?.message ?? error);
   });
@@ -1060,6 +1025,7 @@ function openSettings() {
 function closeSettings() {
   state.isSettingsOpen = false;
   settingsModal.classList.add("hidden");
+  releaseVaultModal(settingsModal);
   if (settingsStatus) settingsStatus.textContent = "";
 }
 
@@ -1069,12 +1035,11 @@ async function saveSettingsFromForm() {
     // stored values through a save so a developer's debug flag is not reset.
     autosaveDebounceMs: state.globalSettings?.autosaveDebounceMs,
     debugMode: state.globalSettings?.debugMode,
-    defaultSnoozeMinutes: settingsDefaultSnoozeMinutesField?.value,
     quickAddEnabled: settingsQuickAddField ? settingsQuickAddField.checked : state.globalSettings?.quickAddEnabled,
     quitRetryMinutes: settingsQuitRetryMinutesField ? settingsQuitRetryMinutesField.value : state.globalSettings?.quitRetryMinutes
   };
   // A value the field can't hold is refused (the last saved value stays).
-  if (CBGroupActions.validateSettingsPatch({ defaultSnoozeMinutes: draft.defaultSnoozeMinutes, quitRetryMinutes: draft.quitRetryMinutes })) {
+  if (CBGroupActions.validateSettingsPatch({ quitRetryMinutes: draft.quitRetryMinutes })) {
     if (settingsStatus) {
       settingsStatus.textContent = t("settings.invalidValue");
       settingsStatus.classList.add("error");
@@ -1440,11 +1405,14 @@ function openAppPicker() {
   appPickerSearch.value = "";
   renderAppPickerResults("");
   appPickerModal.classList.remove("hidden");
-  window.setTimeout(() => appPickerSearch.focus(), 0);
+  focusVaultModal(appPickerModal, appPickerSearch, closeAppPicker);
 }
 
 function closeAppPicker() {
-  if (appPickerModal) appPickerModal.classList.add("hidden");
+  if (appPickerModal) {
+    appPickerModal.classList.add("hidden");
+    releaseVaultModal(appPickerModal);
+  }
 }
 
 function renderAppPickerResults(query) {
@@ -2609,12 +2577,11 @@ function sanitizeGroups(groups) {
 }
 
 // A new group, with the editor's defaults: a unique name in the user's
-// language, their default snooze length, the custom-rule template.
+// language, 30-minute snooze duration, and the custom-rule template.
 function createDefaultGroup(groupType = DEFAULT_GROUP_TYPE) {
   const type = normalizeGroupType(groupType);
   const stored = CBGroupScopes.newGroup(type, {
     name: CBGroupScopes.defaultGroupName(state.groups, type, (kind, number) => t(`groupName.${kind}Pattern`, { number })),
-    snoozeMinutes: state.globalSettings?.defaultSnoozeMinutes,
     blockingRulesText: t("custom.defaultRule")
   }, LOCAL_OWNER);
   return groupView(stored);
@@ -3485,6 +3452,9 @@ function updateSnoozeUI(group, now = Date.now()) {
   snoozeMinutesField.disabled = settingsLocked || !allowSnooze;
   // The snooze kind is a setting of time-limit groups only (owner 2026-09-29).
   const timeLimitMode = normalizeBlockingMode(draft?.mode ?? group.mode) === "after-minutes";
+  const budgetMode = timeLimitMode && (draft?.snoozeKind ?? group.snoozeKind) === "budget";
+  const durationLabel = document.querySelector('label[for="snoozeMinutes"]');
+  if (durationLabel) durationLabel.textContent = t(budgetMode ? "snooze.extraMinutes" : "snooze.minutes");
   snoozeKindRow.classList.toggle("hidden", isCustomGroup || !timeLimitMode);
   snoozeActivationDelayField.disabled = settingsLocked || !allowSnooze;
   snoozeCooldownField.disabled = settingsLocked || !allowSnooze;
@@ -5095,6 +5065,7 @@ function openParentalSettings(group) {
 function closeUnfreezeFlow() {
   state.unfreezeFlow = null;
   confirmModal.classList.add("hidden");
+  releaseVaultModal(confirmModal);
 
   if (state.confirmIntervalId !== null) {
     window.clearInterval(state.confirmIntervalId);
@@ -5118,6 +5089,7 @@ function showSnoozeNotice(group, snoozeEntry, totalBeforeMs) {
 function renderUnfreezeModal(now = Date.now()) {
   if (!state.unfreezeFlow) {
     confirmModal.classList.add("hidden");
+  releaseVaultModal(confirmModal);
     return;
   }
 
@@ -5142,6 +5114,7 @@ function renderUnfreezeModal(now = Date.now()) {
   const remainingCooldownMs = Math.max(state.unfreezeFlow.nextAllowedAtMs - now, 0);
 
   confirmModal.classList.remove("hidden");
+  focusVaultModal(confirmModal, confirmCancelButton, closeUnfreezeFlow);
   if (state.unfreezeFlow.kind === "delete-all") {
     const localizedMessages = getLocalizedUnfreezeMessages();
     const messageIndex = Math.min(completedCount, localizedMessages.length - 1);
@@ -5783,35 +5756,122 @@ function usedTagNames(textarea) {
   }
   return used;
 }
-function renderTagSuggestions(container, textarea, names) {
-  if (!container || !textarea) return;
-  container.replaceChildren();
-  container.classList.toggle("hidden", names.length === 0);
-  if (names.length === 0) return;
-  const label = document.createElement("span");
-  label.className = "tag-suggestions-label";
-  label.id = container.id + "-label";
-  container.setAttribute("aria-labelledby", label.id);
-  label.textContent = t("tagFilter.available");
-  container.appendChild(label);
-  const used = usedTagNames(textarea);
-  for (const name of names) {
-    const chip = document.createElement("button");
-    chip.type = "button";
-    chip.textContent = name;
-    const isUsed = used.has(name.toLowerCase());
-    chip.classList.toggle("used", isUsed);
-    chip.disabled = isUsed;
-    chip.addEventListener("click", () => {
+let activeTagChooser = null;
+const tagSuggestionState = new WeakMap();
+function closeTagChooser(restoreFocus = false) {
+  const chooser = activeTagChooser;
+  if (!chooser) return;
+  activeTagChooser = null;
+  chooser.menu.remove();
+  chooser.button.setAttribute("aria-expanded", "false");
+  if (restoreFocus && chooser.button.isConnected) chooser.button.focus({ preventScroll: true });
+}
+function placeTagChooser() {
+  const chooser = activeTagChooser;
+  if (!chooser) return;
+  if (!chooser.button.isConnected || !chooser.button.getClientRects().length) return closeTagChooser();
+  const box = chooser.button.getBoundingClientRect(), menu = chooser.menu;
+  const width = Math.min(Math.max(240, box.width), innerWidth - 16);
+  menu.style.width = `${width}px`;
+  menu.style.left = `${Math.max(8, Math.min(box.left, innerWidth - width - 8))}px`;
+  menu.style.maxHeight = `${Math.min(320, innerHeight - 16)}px`;
+  const below = innerHeight - box.bottom - 12, above = box.top - 12;
+  const up = below < menu.offsetHeight && above > below;
+  menu.style.maxHeight = `${Math.max(0, Math.min(320, up ? above : below))}px`;
+  menu.style.top = `${Math.max(8, Math.min(up ? box.top - menu.offsetHeight - 4 : box.bottom + 4, innerHeight - menu.offsetHeight - 8))}px`;
+}
+function updateTagChooser() {
+  const chooser = activeTagChooser;
+  if (!chooser) return;
+  if (chooser.groupID !== getSelectedGroup()?.id) return closeTagChooser();
+  const { textarea, names } = tagSuggestionState.get(chooser.container);
+  const query = chooser.search.value.trim().toLowerCase(), used = usedTagNames(textarea);
+  const scroll = chooser.list.scrollTop;
+  chooser.list.replaceChildren();
+  for (const name of names.filter(name => name.toLowerCase().includes(query))) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "vui-menu-item" + (used.has(name.toLowerCase()) ? " is-selected" : "");
+    item.textContent = name;
+    item.disabled = used.has(name.toLowerCase());
+    item.addEventListener("click", () => {
       const current = textarea.value.replace(/\s+$/, "");
       textarea.value = current ? `${current}\n${name}` : name;
-      // Fire the same event typing would, so drafts/autosave react.
       textarea.dispatchEvent(new Event("input", { bubbles: true }));
-      renderTagSuggestions(container, textarea, names);
+      updateTagChooser();
+      chooser.search.focus({ preventScroll: true });
     });
-    container.appendChild(chip);
+    chooser.list.appendChild(item);
   }
+  chooser.list.scrollTop = scroll;
+  placeTagChooser();
 }
+function openTagChooser(container, button) {
+  if (activeTagChooser?.container === container) return closeTagChooser(true);
+  closeTagChooser();
+  window.VaultUI.close();
+  const menu = document.createElement("div");
+  menu.className = "vui-menu tag-chooser";
+  const search = document.createElement("input");
+  search.type = "search";
+  search.placeholder = t("tagFilter.tags");
+  search.setAttribute("aria-label", t("tagFilter.available"));
+  const list = document.createElement("div");
+  list.className = "vui-list-box tag-chooser-list";
+  list.setAttribute("aria-label", t("tagFilter.available"));
+  menu.append(search, list);
+  document.body.appendChild(menu);
+  activeTagChooser = { container, button, menu, search, list, groupID: getSelectedGroup()?.id };
+  button.setAttribute("aria-expanded", "true");
+  search.addEventListener("input", updateTagChooser);
+  menu.addEventListener("keydown", event => {
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeTagChooser(true); }
+    if (["ArrowDown", "ArrowUp"].includes(event.key) && !event.isComposing) {
+      const items = [...list.querySelectorAll("button:not(:disabled)")];
+      if (!items.length) return;
+      const index = items.indexOf(document.activeElement);
+      const next = index < 0 ? (event.key === "ArrowDown" ? 0 : items.length - 1)
+        : (index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+      event.preventDefault();
+      items[next].focus({ preventScroll: true });
+      items[next].scrollIntoView({ block: "nearest" });
+    }
+  });
+  menu.addEventListener("focusout", () => requestAnimationFrame(() => {
+    if (activeTagChooser?.menu === menu && !menu.contains(document.activeElement) && document.activeElement !== button) closeTagChooser();
+  }));
+  updateTagChooser();
+  search.focus({ preventScroll: true });
+}
+function renderTagSuggestions(container, textarea, names) {
+  if (!container || !textarea) return;
+  tagSuggestionState.set(container, { textarea, names });
+  container.classList.toggle("hidden", names.length === 0);
+  if (!names.length) {
+    if (activeTagChooser?.container === container) closeTagChooser();
+    container.replaceChildren();
+    return;
+  }
+  let button = container.querySelector("button");
+  if (!button) {
+    button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary tag-suggestion-trigger";
+    button.setAttribute("aria-expanded", "false");
+    button.addEventListener("click", () => openTagChooser(container, button));
+    container.replaceChildren(button);
+  }
+  button.textContent = t("tagFilter.available");
+  if (activeTagChooser?.container === container) updateTagChooser();
+}
+document.addEventListener("pointerdown", event => {
+  const chooser = activeTagChooser;
+  if (chooser && !chooser.menu.contains(event.target) && !chooser.button.contains(event.target)) closeTagChooser();
+}, true);
+document.addEventListener("scroll", event => {
+  if (activeTagChooser && !activeTagChooser.menu.contains(event.target)) placeTagChooser();
+}, true);
+window.addEventListener("resize", placeTagChooser);
 const tagSuggestionRequests = new WeakMap(); // container -> latest request token
 function refreshTagSuggestions(container, textarea, platform) {
   if (!container || !textarea) return;
@@ -6062,7 +6122,7 @@ if (settingsModal) {
 
 // Global settings auto-save: persist on every committed edit (no Save button).
 {
-  const settingsAutoSaveFields = [settingsDefaultSnoozeMinutesField, settingsQuitRetryMinutesField, settingsQuickAddField];
+  const settingsAutoSaveFields = [settingsQuitRetryMinutesField, settingsQuickAddField];
   const autoSaveSettings = () => {
     saveSettingsFromForm().catch((error) => {
       console.error("Failed to save global settings.", error);
@@ -6072,17 +6132,6 @@ if (settingsModal) {
     if (!field) continue;
     field.addEventListener("change", autoSaveSettings);
   }
-}
-
-if (classifierCollectionToggle) {
-  classifierCollectionToggle.addEventListener("change", () => {
-    classifierBridgeStorageSet({ ...classifierBridgeSettings, collectionEnabled: classifierCollectionToggle.checked }).catch(() => {});
-  });
-}
-if (classifierTaggingModeField) {
-  classifierTaggingModeField.addEventListener("change", () => {
-    classifierBridgeStorageSet({ ...classifierBridgeSettings, taggingMode: classifierTaggingModeField.value }).catch(() => {});
-  });
 }
 
 if (localFolderChooseButton) {
