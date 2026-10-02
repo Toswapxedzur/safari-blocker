@@ -14,5 +14,7 @@ OUT_DIR="$ROOT/extension"
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 unzip -q "$ZIP" -d "$OUT_DIR"
+# Platform branding stays local even when shared browser code is regenerated.
+cp "$ROOT/Assets/Branding/BrowserIcons/"*.{png,svg} "$OUT_DIR/icons/"
 echo "[safariBlocker] generated $ENVIRONMENT browser assets -> $OUT_DIR"
 echo "Build the separate containing app: SAFARI_VAULT_ENVIRONMENT=$ENVIRONMENT ./scripts/build-app.sh"
