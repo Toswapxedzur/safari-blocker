@@ -72,6 +72,12 @@ final class SafariFileBroker {
         do {
             let relative = action == "list" ? directoryPath : path
             let target = try safeURL(relative, root: root, isDirectory: action == "list")
+            if action != "list", action != "exists", FileManager.default.fileExists(atPath: target.path),
+               try target.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile != true {
+                // Named pipes/devices can block Foundation reads indefinitely.
+                // The browser contract exposes regular text files only.
+                throw FileError.unsupportedFileType
+            }
             switch action {
             case "exists":
                 reply["exists"] = (try? target.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
