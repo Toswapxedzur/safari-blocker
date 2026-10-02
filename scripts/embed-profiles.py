@@ -65,7 +65,7 @@ def main():
                 raise ValueError('Safari signing identity and profile belong to different Apple developer teams.')
             with tempfile.TemporaryDirectory(prefix='safari-signing-certificate-') as temporary:
                 prefix = pathlib.Path(temporary) / 'certificate'
-                subprocess.run(['codesign', '-d', '--extract-certificates', str(prefix), str(bundle)], capture_output=True, check=True)
+                subprocess.run(['codesign', '-d', '--extract-certificates=' + str(prefix), str(bundle)], capture_output=True, check=True)
                 if prefix.with_name(prefix.name + '0').read_bytes() not in data['DeveloperCertificates']:
                     raise ValueError('The Safari provisioning profile does not authorize the actual signing certificate.')
             actual = plistlib.loads(subprocess.run(['codesign', '-d', '--entitlements', ':-', str(bundle)], capture_output=True, check=True).stdout)
