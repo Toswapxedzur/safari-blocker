@@ -38,6 +38,7 @@ PY
 mkdir -p "$OUT"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APPEX/Contents/MacOS" "$APPEX/Contents/Resources"
+cp "$ROOT/Assets/Branding/safari-vault.icns" "$APP/Contents/Resources/SafariVault.icns"
 cp -R "$EXTENSION/." "$APPEX/Contents/Resources/"
 # These remain exact copies of the canonical custom-rule engine.
 cp "$ROOT/../customBlocker/rule-core.js" "$ROOT/../customBlocker/event-sandbox.js" "$APPEX/Contents/Resources/"
@@ -48,7 +49,7 @@ version=json.loads((pathlib.Path(appex)/'Contents/Resources/manifest.json').read
 base={'CFBundleInfoDictionaryVersion':'6.0','CFBundleShortVersionString':version,'CFBundleVersion':version,
       'LSMinimumSystemVersion':'13.0','VaultEnvironment':environment}
 a=dict(base,CFBundleIdentifier=bundle,CFBundleName=name,CFBundleDisplayName=name,CFBundleExecutable='SafariVault',
-       CFBundlePackageType='APPL',NSPrincipalClass='NSApplication',VaultExtensionIdentifier=bundle+'.extension')
+       CFBundleIconFile='SafariVault.icns',CFBundlePackageType='APPL',NSPrincipalClass='NSApplication',VaultExtensionIdentifier=bundle+'.extension')
 e=dict(base,CFBundleIdentifier=bundle+'.extension',CFBundleName='Safari Vault Extension',CFBundleExecutable='SafariVaultExtension',
        CFBundlePackageType='XPC!',NSExtension={'NSExtensionPointIdentifier':'com.apple.Safari.web-extension',
                                            'NSExtensionPrincipalClass':'SafariWebExtensionHandler'})
