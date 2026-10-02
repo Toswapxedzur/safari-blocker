@@ -688,12 +688,24 @@ window.__cbLocalFolderStatus = function (payload) {
     : t("settings.localFolderStatusNone");
 };
 
+async function safariLocalFolderRequest(type) {
+  const host = window.CBLocalHubEnvironment?.current?.nativeHost || "com.adamancia.vault.safari";
+  const response = await chrome.runtime.sendNativeMessage(host, { type });
+  if (!response || !response.ok) throw new Error(response?.error || "local-folder-not-available");
+  window.__cbLocalFolderStatus(response);
+}
+
 async function renderLocalFolderStatus() {
   if (!localFolderStatus) return;
   // Desktop: the folder grant is native (the web view has no directory picker);
   // ask the host for the current grant and let __cbLocalFolderStatus render it.
   if (IS_NATIVE_DESKTOP) {
     postToNativeShell({ kind: "local-folder-status" });
+    return;
+  }
+  if (LOCAL_PROGRAM_ID === "safari") {
+    try { await safariLocalFolderRequest("local-folder-status"); }
+    catch (error) { localFolderStatus.textContent = String(error?.message || error); }
     return;
   }
   if (!("showDirectoryPicker" in window)) {
@@ -735,6 +747,7 @@ async function renderLocalFolderStatus() {
 }
 
 async function chooseLocalFolder() {
+  if (LOCAL_PROGRAM_ID === "safari") return safariLocalFolderRequest("local-folder-choose");
   if (!("showDirectoryPicker" in window)) {
     if (localFolderStatus) localFolderStatus.textContent = t("settings.localFolderUnsupported");
     return;
@@ -780,6 +793,7 @@ async function chooseLocalFolder() {
 }
 
 async function revokeLocalFolder() {
+  if (LOCAL_PROGRAM_ID === "safari") return safariLocalFolderRequest("local-folder-revoke");
   await localFolderDbDelete(LOCAL_FOLDER_ROOT_KEY);
   await localFolderDbDelete(LOCAL_FOLDER_META_KEY);
   localFolderHandle = null;
@@ -790,14 +804,14 @@ async function revokeLocalFolder() {
 function applyConnectionStatus(raw) {
   const incoming = raw && typeof raw === "object" ? raw : {};
   const wasOnline = bridgeIsOnline();
-  const wasAway = macVaultAway();
+  const wasAway = desktopVaultAway();
   state.connectionStatus = {
     received: true,
     state: typeof incoming.state === "string" ? incoming.state : "off",
     hubProgram: window.CBBridgeProtocol.hubProgramFromStatus(incoming)
   };
-  // Linked groups turn enforce-only (or editable again) with Mac Vault.
-  if (wasAway !== macVaultAway()) render();
+  // Linked groups turn enforce-only (or editable again) with the desktop Vault.
+  if (wasAway !== desktopVaultAway()) render();
   if (!wasOnline && bridgeIsOnline()) requestClusters();
 }
 
@@ -937,7 +951,7 @@ function renderLinkSection(group, editable) {
   if (!groupLinkSection) return;
   const cluster = groupConnectionCluster(group);
   // The Mac editor runs inside the hub itself: always reachable there.
-  const hubOnline = IS_NATIVE_DESKTOP || (bridgeIsOnline() && !macVaultAway());
+  const hubOnline = IS_NATIVE_DESKTOP || (bridgeIsOnline() && !desktopVaultAway());
   if (cluster) {
     const others = (cluster.members || []).filter((m) => m && m.program !== LOCAL_PROGRAM_ID);
     groupLinkStatus.textContent = t("link.linkedWith", {
@@ -952,18 +966,8 @@ function renderLinkSection(group, editable) {
   const candidates = linkCandidates();
   groupLinkStatus.textContent = t(candidates.length > 0 || !hubOnline ? "link.none" : "link.noCandidates");
   const current = groupLinkTarget.value;
-  groupLinkTarget.innerHTML = "";
-  const placeholder = document.createElement("option");
-  placeholder.value = "";
-  placeholder.textContent = t("link.pickPlaceholder");
-  groupLinkTarget.appendChild(placeholder);
-  for (const candidate of candidates) {
-    const option = document.createElement("option");
-    option.value = `${candidate.program}␟${candidate.id}`;
-    option.textContent = t("link.candidate", { name: candidate.name, program: programLabel(candidate.program) });
-    groupLinkTarget.appendChild(option);
-  }
-  if ([...groupLinkTarget.options].some((o) => o.value === current)) groupLinkTarget.value = current;
+  const choices = [["", t("link.pickPlaceholder")], ...candidates.map(candidate => [`${candidate.program}␟${candidate.id}`, t("link.candidate", { name: candidate.name, program: programLabel(candidate.program) })])];
+  window.VaultUI.setSelectOptions(groupLinkTarget, choices, choices.some(choice => choice[0] === current) ? current : "");
   groupLinkTarget.classList.remove("hidden");
   groupLinkButton.classList.remove("hidden");
   groupUnlinkButton.classList.add("hidden");
@@ -985,7 +989,7 @@ async function sendLinkRequest(message) {
     const response = await chrome.runtime.sendMessage(message);
     if (response && response.ok === false) showLinkRefusal(response.error);
   } catch (_) {
-    showLinkRefusal("macapp-unavailable");
+    showLinkRefusal("desktop-unavailable");
   }
 }
 
@@ -1315,13 +1319,18 @@ function commitBlockedSites(sites) {
 // window.__cbAppInventory: id + name + icon); elsewhere the chips are read-only
 // and the entry arrives through a linked group.
 
+let appInventoryIndex = { source: null, size: -1, byID: new Map() };
 function getAppInventory() {
   return Array.isArray(window.__cbAppInventory) ? window.__cbAppInventory : [];
 }
 
 function findInventoryApp(bundleId) {
   if (!bundleId) return null;
-  return getAppInventory().find((entry) => entry && entry.id === bundleId) || null;
+  const inventory = getAppInventory();
+  if (appInventoryIndex.source !== inventory || appInventoryIndex.size !== inventory.length) {
+    appInventoryIndex = { source: inventory, size: inventory.length, byID: new Map(inventory.filter(Boolean).map(app => [app.id, app])) };
+  }
+  return appInventoryIndex.byID.get(bundleId) || null;
 }
 
 function appDisplayName(app) {
@@ -1378,8 +1387,8 @@ function makeAppIconElement(app) {
 
 function renderBlockedApps() {
   if (!blockedAppsList) return;
-  blockedAppsList.innerHTML = "";
-  for (const app of getDraftApps()) {
+  VaultUI.renderList(blockedAppsList, { scope: document, key: blockedAppsList.dataset.vuiSearch,
+    items: getDraftApps(), text: app => appDisplayName(app) + " " + app.id, render: app => {
     const chip = document.createElement("div");
     chip.className = "app-chip";
     chip.setAttribute("role", "listitem");
@@ -1401,8 +1410,8 @@ function renderBlockedApps() {
       });
       chip.appendChild(remove);
     }
-    blockedAppsList.appendChild(chip);
-  }
+    return chip;
+  }, trailing: fragment => {
   if (!blockedAppsEditable) return;
   const addTile = document.createElement("button");
   addTile.type = "button";
@@ -1410,7 +1419,8 @@ function renderBlockedApps() {
   addTile.setAttribute("aria-label", t("apps.addAria"));
   addTile.textContent = "+";
   addTile.addEventListener("click", () => openAppPicker());
-  blockedAppsList.appendChild(addTile);
+  fragment.appendChild(addTile);
+  } });
 }
 
 function openAppPicker() {
@@ -1438,10 +1448,8 @@ function renderAppPickerResults(query) {
       if (!normalizedQuery) return true;
       const name = (app.name || "").toLowerCase();
       return name.includes(normalizedQuery) || app.id.toLowerCase().includes(normalizedQuery);
-    })
-    .slice(0, 60);
-  appPickerResults.innerHTML = "";
-  for (const app of matches) {
+    });
+  VaultUI.renderList(appPickerResults, { scope: document, key: "app-picker", searchable: false, items: matches, text: app => app.name + " " + app.id, pageSize: 60, render: app => {
     const row = document.createElement("button");
     row.type = "button";
     row.className = "app-picker-row";
@@ -1462,8 +1470,8 @@ function renderAppPickerResults(query) {
       commitBlockedApps([...getDraftApps(), { id: app.id, name: app.name || app.id }]);
       closeAppPicker();
     });
-    appPickerResults.appendChild(row);
-  }
+    return row;
+  } });
   if (appPickerEmpty) appPickerEmpty.classList.toggle("hidden", matches.length > 0);
 }
 
@@ -1524,9 +1532,8 @@ function renderBlockedSites() {
     closeSiteAddPanel();
   }
 
-  blockedSitesList.innerHTML = "";
-
-  for (const host of getDraftSites()) {
+  VaultUI.renderList(blockedSitesList, { scope: document, key: blockedSitesList.dataset.vuiSearch,
+    items: getDraftSites(), text: host => host, render: host => {
     const chip = document.createElement("div");
     chip.className = "site-chip";
     chip.setAttribute("role", "listitem");
@@ -1552,8 +1559,8 @@ function renderBlockedSites() {
       chip.appendChild(remove);
     }
 
-    blockedSitesList.appendChild(chip);
-  }
+    return chip;
+  }, trailing: fragment => {
 
   // Trailing "+" tile to reveal the multi-line add panel.
   const addTile = document.createElement("button");
@@ -1563,7 +1570,8 @@ function renderBlockedSites() {
   addTile.textContent = "+";
   addTile.disabled = !editable;
   addTile.addEventListener("click", () => openSiteAddPanel());
-  blockedSitesList.appendChild(addTile);
+  fragment.appendChild(addTile);
+  } });
 }
 
 function openSiteAddPanel() {
@@ -1683,8 +1691,7 @@ function setupChipField(field, options) {
   function renderChips() {
     const editable = !field.disabled;
     list.classList.toggle("entry-chip-list-disabled", !editable);
-    list.innerHTML = "";
-    for (const entry of getChipFieldEntries(field)) {
+    VaultUI.renderList(list, { scope: document, key: list.dataset.vuiSearch, items: getChipFieldEntries(field), text: entry => entry, render: entry => {
       const valid = normalize(entry) !== null;
       const chip = document.createElement("span");
       chip.className = "entry-chip" + (valid ? "" : " entry-chip-invalid");
@@ -1707,12 +1714,13 @@ function setupChipField(field, options) {
         });
         chip.appendChild(remove);
       }
-      list.appendChild(chip);
-    }
+      return chip;
+    }, trailing: fragment => {
 
     addInput.disabled = !editable;
     addInput.placeholder = t("chip.addPlaceholder");
-    list.appendChild(addInput);
+    fragment.appendChild(addInput);
+    } });
   }
 
   field.__cbChip = { render: renderChips };
@@ -2557,7 +2565,7 @@ function startGroupReorder(event, groupId) {
     }
 
     finishGroupDragRelease(dragContext, insertIndex, () => {
-      reorderGroups(draggedGroupId, insertIndex).catch((error) => {
+      reorderGroups(draggedGroupId, state.groups.findIndex(group => group.id === dragContext.cards[insertIndex].dataset.groupId)).catch((error) => {
         console.error("Failed to reorder block groups.", error);
         setStatus(t("status.errorReorderGroups"), true);
         clearDragState(true);
@@ -2815,8 +2823,16 @@ function markCustomGroupSourceActive(groupId, source) {
   }
 }
 
+let indexedGroups = null, indexedGroupCount = -1, groupsByID = new Map();
+function groupByID(groupId) {
+  if (indexedGroups !== state.groups || indexedGroupCount !== state.groups.length) {
+    indexedGroups = state.groups; indexedGroupCount = state.groups.length;
+    groupsByID = new Map(state.groups.map(group => [group.id, group]));
+  }
+  return groupsByID.get(groupId);
+}
 function getDraftForGroup(groupId) {
-  const group = state.groups.find((item) => item.id === groupId);
+  const group = groupByID(groupId);
   return group ? { ...groupToDraft(group), ...(state.drafts[groupId] || {}) } : null;
 }
 
@@ -2869,31 +2885,31 @@ function isGroupEditable(group, now = Date.now()) {
   return !getFreezeStatus(group, now).isFrozen && !isEnforceOnly(group);
 }
 
-// Owner 2026-09-26: Mac Vault holds a linked group's real state. While it is
+// The desktop Vault holds a linked group's real state. While it is
 // away this browser only ENFORCES a linked group (from its copy of the links,
 // kept by the worker): nothing about the group can change — settings, entries,
-// freeze, snooze, delete — until Mac Vault is back.
-function macVaultAway() {
+// freeze, snooze, delete — until the desktop Vault is back.
+function desktopVaultAway() {
   if (IS_NATIVE_DESKTOP) return false;
   const s = state.connectionStatus || {};
   // Unknown until the worker's first status push: not "away" yet.
   if (!s.received) return false;
-  return !(s.state === "connected" && s.hubProgram === "macapp");
+  return !(s.state === "connected" && (s.hubProgram === "macapp" || s.hubProgram === "windowsapp"));
 }
 
 // True (and says why) when the group is enforce-only right now.
 // The one refusal for a change the group can't take right now, with its
-// reason: Mac Vault is away (enforce-only) or the group is frozen.
+// reason: the desktop Vault is away (enforce-only) or the group is frozen.
 function refuseUnlessEditable(group) {
   if (!group) return true;
-  if (refuseWhileMacVaultAway(group)) return true;
+  if (refuseWhileDesktopVaultAway(group)) return true;
   if (isGroupEditable(group)) return false;
   setStatus(t("status.frozenCannotChange"), true);
   render();
   return true;
 }
 
-function refuseWhileMacVaultAway(group) {
+function refuseWhileDesktopVaultAway(group) {
   if (!isEnforceOnly(group)) return false;
   setStatus(t("link.enforceOnly"), true);
   render();
@@ -2901,7 +2917,7 @@ function refuseWhileMacVaultAway(group) {
 }
 
 function isEnforceOnly(group) {
-  if (!group || !macVaultAway()) return false;
+  if (!group || !desktopVaultAway()) return false;
   const links = Array.isArray(state.linkCopy) ? state.linkCopy : [];
   return links.some((cluster) => window.CBBridgeProtocol.clusterForGroup([cluster], group, LOCAL_PROGRAM_ID) === cluster);
 }
@@ -3239,14 +3255,13 @@ function updateBulkActionsUI(now = Date.now()) {
   bulkActionNotice.textContent = strictLocked ? t("groups.deleteAllDisabled") : "";
 }
 
+let renderedGroups = null;
 function renderGroupList(now = Date.now()) {
   groupList.classList.remove("is-reordering");
-  groupList.textContent = "";
+  renderedGroups = state.groups;
 
-  // No groups: the editor says so, with its own Add button.
-  if (state.groups.length === 0) return;
-
-  for (const group of state.groups) {
+  VaultUI.renderList(groupList, { scope: document, key: groupList.dataset.vuiSearch,
+    items: state.groups, text: group => (getDraftForGroup(group.id)?.name || group.name) + " " + getGroupMetaText(group, getDraftForGroup(group.id), now), render: group => {
     const draft = getDraftForGroup(group.id);
     const card = document.createElement("div");
     card.className = `group-card${group.id === state.selectedGroupId ? " active" : ""}${group.enabled ? "" : " is-off"}`;
@@ -3341,8 +3356,8 @@ function renderGroupList(now = Date.now()) {
       selectGroup(group.id);
     });
 
-    groupList.appendChild(card);
-  }
+    return card;
+  } });
 }
 
 // The badge and the card select the same remembered destination.
@@ -3878,21 +3893,11 @@ function renderDynamicView() {
 function refreshGroupListInPlace(now) {
   const cards = groupList.querySelectorAll(".group-card[data-group-id]");
 
-  if (cards.length !== state.groups.length) {
-    renderGroupList(now);
-    return;
-  }
+  if (renderedGroups !== state.groups) { renderGroupList(now); return; }
 
-  for (let i = 0; i < cards.length; i++) {
-    if (cards[i].dataset.groupId !== state.groups[i].id) {
-      renderGroupList(now);
-      return;
-    }
-  }
-
-  for (let i = 0; i < cards.length; i++) {
-    const card = cards[i];
-    const group = state.groups[i];
+  for (const card of cards) {
+    const group = groupByID(card.dataset.groupId);
+    if (!group) { renderGroupList(now); return; }
     const draft = getDraftForGroup(group.id);
 
     const wantsActive = group.id === state.selectedGroupId;
@@ -4113,7 +4118,7 @@ async function persistGroups(ids, { reorder = false, message = "" } = {}) {
 // A snooze entry the user started or ended here; the service worker / Mac
 // Vault count its time and share it with linked devices.
 async function persistSnooze(groupId, entry, message = "") {
-  if (refuseWhileMacVaultAway(state.groups.find((item) => item.id === groupId))) return;
+  if (refuseWhileDesktopVaultAway(state.groups.find((item) => item.id === groupId))) return;
   const stored = (await chrome.storage.local.get({ [GROUP_SNOOZES_KEY]: {} }))[GROUP_SNOOZES_KEY];
   await chrome.storage.local.set({ [GROUP_SNOOZES_KEY]: { ...(stored && typeof stored === "object" ? stored : {}), [groupId]: entry } });
   if (message) setStatus(message);
@@ -4387,7 +4392,7 @@ function deleteAllStillCovered(passedPinHashes, now = Date.now()) {
 async function deleteAllGroups() {
   await flushAutosave();
   const away = state.groups.find(isEnforceOnly);
-  if (away && refuseWhileMacVaultAway(away)) return;
+  if (away && refuseWhileDesktopVaultAway(away)) return;
 
   const plan = CBGroupActions.deleteAllPlan(state.groups, Date.now());
   if (plan.error) {
@@ -4413,7 +4418,7 @@ async function deleteAllGroups() {
 async function clearAllGroups() {
   // The last step's own check: a linked group turned enforce-only meanwhile.
   const away = state.groups.find(isEnforceOnly);
-  if (away && refuseWhileMacVaultAway(away)) return;
+  if (away && refuseWhileDesktopVaultAway(away)) return;
   const ids = state.groups.map((group) => group.id);
   state.groups = [];
   state.drafts = {};
@@ -4434,7 +4439,7 @@ async function deleteSelectedGroup() {
     return;
   }
 
-  if (refuseWhileMacVaultAway(group)) return;
+  if (refuseWhileDesktopVaultAway(group)) return;
   if (!isGroupEditable(group)) {
     setStatus(t("status.frozenCannotDelete"), true);
     render();
@@ -4802,7 +4807,7 @@ async function reorderGroups(draggedGroupId, insertIndex) {
 // hours are the wait gate; a PIN is set in the guardian settings (gear).
 async function applyFreeze() {
   const group = getSelectedGroup();
-  if (!group || refuseWhileMacVaultAway(group)) return;
+  if (!group || refuseWhileDesktopVaultAway(group)) return;
   await flushAutosave();
   const current = getSelectedGroup();
   const now = Date.now();
@@ -4829,7 +4834,7 @@ async function applyFreeze() {
 // the confirmation — always (owner 2026-09-26).
 function openUnfreezeFlow() {
   const group = getSelectedGroup();
-  if (!group || refuseWhileMacVaultAway(group)) return;
+  if (!group || refuseWhileDesktopVaultAway(group)) return;
   const plan = CBGroupActions.unlockPlan(group, Date.now());
   if (plan.error) {
     if (plan.waitUntilMs) setStatus(t("status.strictLocked"), true);
@@ -4869,7 +4874,7 @@ function openUnfreezeFlow() {
 async function persistGroupFields(groupId, fields, statusMsg) {
   // A long flow (a 10 × 5 s confirmation, an open PIN panel) checks again at
   // the end: Mac Vault may have gone away meanwhile.
-  if (refuseWhileMacVaultAway(state.groups.find((item) => item.id === groupId))) return;
+  if (refuseWhileDesktopVaultAway(state.groups.find((item) => item.id === groupId))) return;
   state.groups = state.groups.map((item) =>
     item.id === groupId ? { ...item, ...fields } : item
   );
@@ -4965,7 +4970,7 @@ function openPinEntry({ title, description, onSubmit, onCancel }) {
 
 // Guardian settings overlay: set / verify / clear the group's password.
 function openParentalSettings(group) {
-  if (refuseWhileMacVaultAway(group)) return;
+  if (refuseWhileDesktopVaultAway(group)) return;
   const pinId = "settings-pin";
   const vals = {};
   let handle = null;
@@ -5199,7 +5204,7 @@ async function handleUnfreezeConfirm() {
 async function startSnooze() {
   let group = getSelectedGroup();
 
-  if (!group || refuseWhileMacVaultAway(group)) {
+  if (!group || refuseWhileDesktopVaultAway(group)) {
     return;
   }
 
@@ -5316,7 +5321,7 @@ async function applySnoozeStart(group) {
 
 async function endSnooze() {
   const group = getSelectedGroup();
-  if (!group || refuseWhileMacVaultAway(group)) return;
+  if (!group || refuseWhileDesktopVaultAway(group)) return;
   // Ending keeps an ENDED entry (stamped now) so the end reaches linked
   // devices as the newest change (group-actions.js).
   const result = CBGroupActions.endSnoozeEntry(state.groupSnoozes[group.id], Date.now());
@@ -5760,8 +5765,8 @@ function updateTagChooser() {
   const { textarea, names } = tagSuggestionState.get(chooser.container);
   const query = chooser.search.value.trim().toLowerCase(), used = usedTagNames(textarea);
   const scroll = chooser.list.scrollTop;
-  chooser.list.replaceChildren();
-  for (const name of names.filter(name => name.toLowerCase().includes(query))) {
+  VaultUI.renderList(chooser.list, { scope: chooser.menu, key: "available-tags", searchable: false, label: t("tagFilter.available"),
+    items: names.filter(name => name.toLowerCase().includes(query)), text: name => name, render: name => {
     const item = document.createElement("button");
     item.type = "button";
     item.className = "vui-menu-item" + (used.has(name.toLowerCase()) ? " is-selected" : "");
@@ -5774,8 +5779,8 @@ function updateTagChooser() {
       updateTagChooser();
       chooser.search.focus({ preventScroll: true });
     });
-    chooser.list.appendChild(item);
-  }
+    return item;
+  } });
   chooser.list.scrollTop = scroll;
   placeTagChooser();
 }
