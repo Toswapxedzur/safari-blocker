@@ -18,3 +18,5 @@
 - **Field Info (2026-10-02):** 10px blue-gray icons retain a 24px invisible hit area. English field explanations are explicit; built-in settings, names, switches, searches and picker fields use the shared component. Other locales retain inline help.
 
 - **Compact Info (2026-10-02):** 10px icons retain a 24px click area; explanations use 12px text in a softly shaded, 260px-wide popup with tighter padding. English search copy is concise.
+
+- Generated English user and code guides are separate in `extension/{manual,code-manual}/`; Copy code docs uses the browser API, including Safari’s native custom-rule transport. Regenerate with `build.sh` from the shared browser source.
