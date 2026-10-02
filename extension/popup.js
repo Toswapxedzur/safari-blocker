@@ -6436,7 +6436,7 @@ async function writeSiteAccessBannerDismissed(value) {
 async function hasAllUrlsHostAccess() {
   try {
     if (!chrome?.permissions?.contains) return true;
-    return await chrome.permissions.contains({ origins: ["<all_urls>"] });
+    return await chrome.permissions.contains({ origins: ["http://*/*", "https://*/*"] });
   } catch (_) {
     return true;
   }
@@ -6460,7 +6460,7 @@ async function initializeSiteAccessBanner() {
           setStatus(t("siteAccess.grantFailed"), true);
           return;
         }
-        const ok = await chrome.permissions.request({ origins: ["<all_urls>"] });
+        const ok = await chrome.permissions.request({ origins: ["http://*/*", "https://*/*"] });
         if (ok) {
           siteAccessBanner.hidden = true;
           await writeSiteAccessBannerDismissed(true);
