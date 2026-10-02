@@ -4,3 +4,4 @@
 - `main.swift`: actual native handler harness and JavaScriptCore/journal/folder contract checks. The test-directory override is compiled only with `SAFARI_TESTING` and excluded from the shipping handler.
 - `native-process.py`: cold handler process rehydration, infinite-loop native watchdog, sibling recovery, quarantine, and profile boundaries.
 - `profiles.py`: rejects invalid signing profile metadata using account-free fixtures; does not claim a signed runtime test.
+- `heartbeat.swift`: disabled/re-enabled extension and closed/reopened browser heartbeat generations, query errors and stale callback isolation.

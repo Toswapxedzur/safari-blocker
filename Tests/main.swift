@@ -5,6 +5,7 @@ import Darwin
 
 final class TestExtensionContext: NSExtensionContext {
     let items: [Any]
+    var afterReply: (() -> Void)?
     init(message: [String: Any], profile: String) {
         let item = NSExtensionItem()
         item.userInfo = [SFExtensionMessageKey: message]
@@ -19,10 +20,27 @@ final class TestExtensionContext: NSExtensionContext {
             print(json)
             fflush(stdout)
         }
+        if let afterReply { afterReply(); return }
         // A real hung handler must terminate through its watchdog (exit124);
         // a healthy request exits cleanly after the native reply is observed.
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { exit(0) }
     }
+}
+
+if CommandLine.arguments.contains("--native-messages") {
+    let data = FileHandle.standardInput.readDataToEndOfFile()
+    let messages = try JSONSerialization.jsonObject(with: data) as! [[String: Any]]
+    let profile = ProcessInfo.processInfo.environment["SAFARI_TEST_PROFILE"] ?? "profile-one"
+    let handler = SafariWebExtensionHandler()
+    let contexts = messages.map { TestExtensionContext(message: $0, profile: profile) }
+    for index in contexts.indices {
+        contexts[index].afterReply = {
+            if index + 1 < contexts.count { handler.beginRequest(with: contexts[index + 1]) }
+            else { DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { exit(0) } }
+        }
+    }
+    handler.beginRequest(with: contexts[0])
+    withExtendedLifetime((contexts, handler)) { dispatchMain() }
 }
 
 if CommandLine.arguments.contains("--native-message") {

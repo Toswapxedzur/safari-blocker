@@ -64,8 +64,9 @@ PY
 ARCHES=("$ARCH")
 if [ "$ARCH" = universal ]; then ARCHES=(x86_64 arm64); fi
 for BUILD_ARCH in "${ARCHES[@]}"; do
-  xcrun swiftc -sdk "$SDK" -target "$BUILD_ARCH-apple-macos13.0" -O \
-    -module-name SafariVault "$ROOT/Sources/SafariApp.swift" -o "$OUT/SafariVault-$BUILD_ARCH"
+  xcrun swiftc -sdk "$SDK" -target "$BUILD_ARCH-apple-macos13.0" -O -parse-as-library \
+    -module-name SafariVault "$ROOT/Sources/SafariApp.swift" "$ROOT/Sources/SafariHeartbeatGate.swift" \
+    -o "$OUT/SafariVault-$BUILD_ARCH"
   xcrun swiftc -sdk "$SDK" -target "$BUILD_ARCH-apple-macos13.0" -O -application-extension \
     -parse-as-library -module-name SafariVaultExtension \
     "$ROOT/Sources/SafariRuntime.swift" "$ROOT/Sources/SafariFileBroker.swift" "$ROOT/Sources/SafariWebExtensionHandler.swift" \
