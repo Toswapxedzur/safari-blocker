@@ -36,6 +36,8 @@ Classifier collectors and tag controls are generated from the same Chrome adapte
 
 Safari can suspend an MV3 background page. The separate containing app wakes it every second through Safari's native messaging port, so timer and file rules keep running even with no visible page. It sends pulses only while Safari is already running; quitting Safari does not cause it to reopen. Granted visible pages also wake the background and reconnect the authenticated hub. Schedule transition alarms and navigation handlers restore enforcement after suspension. These wake messages carry no rendered evidence or browsing data.
 
+The helper checks the supported Safari extension state periodically. A confirmed disabled extension stops pulses and releases its activity assertion; unavailable or pending state queries preserve the last known state. Reopening the helper after native activation refreshes that state immediately, so enabling the extension again resumes the runtime. Dispatch/query generations ignore stale callbacks from a previous browser session. The activity assertion permits normal system sleep.
+
 ## Verification
 
 Run `./Tests/run.sh` from a source export on mini1. It compiles the native handler with application-extension restrictions, exercises real JavaScriptCore execution and state recovery, validates native file limits, traversal and symlink refusal, and runs packaged browser/native identity checks. Live Safari verification additionally requires the owner to enable the extension and all-website access. Do not treat native tests or Chrome fixture tests as a completed live Safari run.
