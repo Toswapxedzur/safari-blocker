@@ -4,6 +4,8 @@ Safari Vault is the macOS Safari front of Adamancia Vault. Its small containing 
 
 The shared browser source lives in `../customBlocker`. `extension/` is generated; edit the canonical source and regenerate it instead of editing the copies.
 
+Safari requests `storage` and `unlimitedStorage` for local extension settings. This avoids a Safari 18.6 quota error when shrinking settings containing Unicode, including deleting the last group. The permission changes no website or filesystem access; collection settings and existing cache limits still apply. Safari supports it from version 16: [Apple's extension API overview](https://developer.apple.com/videos/play/wwdc2022/10099/?time=1087).
+
 ## Build
 
 All product testing and build verification run on mini1. Apple Command Line Tools with the macOS SDK are sufficient; the Safari extension converter and an Xcode project are not required.
