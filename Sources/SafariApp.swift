@@ -1,0 +1,128 @@
+import AppKit
+import SafariServices
+
+final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
+    private var window: NSWindow!
+    private var status: NSTextField!
+    private var heartbeat: Timer?
+    private var ruleActivity: NSObjectProtocol?
+    private var dispatchPending = false
+    private var backgroundLaunch: Bool { CommandLine.arguments.contains("--background") }
+    private var extensionID: String {
+        Bundle.main.object(forInfoDictionaryKey: "VaultExtensionIdentifier") as? String ?? "com.adamancia.vault.safari.extension"
+    }
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        heartbeat = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.pulse() }
+        pulse()
+        if backgroundLaunch { NSApp.setActivationPolicy(.accessory); return }
+        showOnboarding()
+    }
+    private func showOnboarding() {
+        NSApp.setActivationPolicy(.regular)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 530, height: 300), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        window.title = "Safari Vault"
+        window.center()
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 18
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let title = NSTextField(labelWithString: "Safari Vault")
+        title.font = .systemFont(ofSize: 26, weight: .semibold)
+        let body = NSTextField(wrappingLabelWithString: "Enable Safari Vault in Safari Extensions, then allow access to all websites. Browser blocking and custom rules work independently. Connect Mac Vault for tagging, shared groups and Activity.")
+        body.font = .systemFont(ofSize: 14)
+        let button = NSButton(title: "Open Safari Extensions", target: self, action: #selector(openPreferences))
+        button.bezelStyle = .rounded
+        status = NSTextField(wrappingLabelWithString: "")
+        status.font = .systemFont(ofSize: 12)
+        stack.addArrangedSubview(title); stack.addArrangedSubview(body)
+        stack.addArrangedSubview(button); stack.addArrangedSubview(status)
+        window.contentView?.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 28),
+            stack.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -28),
+            stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 28)
+        ])
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        refreshState()
+    }
+    @objc private func openPreferences() {
+        SFSafariApplication.showPreferencesForExtension(withIdentifier: extensionID) { [weak self] error in
+            DispatchQueue.main.async {
+                if error != nil { self?.status.stringValue = "Safari could not open the extension settings. Open Safari Settings → Extensions." }
+                else { self?.refreshState() }
+            }
+        }
+    }
+    private func refreshState() {
+        SFSafariExtensionManager.getStateOfSafariExtension(withIdentifier: extensionID) { [weak self] state, error in
+            DispatchQueue.main.async {
+                self?.status.stringValue = state?.isEnabled == true
+                    ? "Safari Vault is enabled. Allow access to all websites in Safari's extension settings."
+                    : "Enable Safari Vault and allow access to all websites in Safari's extension settings."
+            }
+        }
+    }
+    private func pulse() {
+        let safariRunning = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Safari").isEmpty
+        if safariRunning, ruleActivity == nil {
+            // User-enabled custom timers must continue with every browser
+            // window hidden. Allow ordinary system sleep while avoiding App
+            // Nap's deferred timers during the user's active browser session.
+            ruleActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                                reason: "Safari Vault custom rule timers")
+        } else if !safariRunning, let activity = ruleActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            ruleActivity = nil
+        }
+        guard safariRunning, !dispatchPending else { return }
+        dispatchPending = true
+        // Apple's dispatch API can launch Safari. Checking its process first
+        // ensures quitting the browser does not cause it to be reopened.
+        SFSafariApplication.dispatchMessage(withName: "safari-lifecycle-tick", toExtensionWithIdentifier: extensionID,
+                                           userInfo: ["type": "safari-lifecycle-tick"]) { [weak self] _ in
+            DispatchQueue.main.async { self?.dispatchPending = false }
+        }
+    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        NSApp.setActivationPolicy(.accessory)
+        return false
+    }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        pulse()
+        if !hasVisibleWindows {
+            if window == nil { showOnboarding() }
+            else { NSApp.setActivationPolicy(.regular); window.makeKeyAndOrderFront(nil) }
+        }
+        return true
+    }
+    func applicationWillTerminate(_ notification: Notification) {
+        if let activity = ruleActivity { ProcessInfo.processInfo.endActivity(activity) }
+    }
+}
+if CommandLine.arguments.contains("--native-connection-state") {
+    let environment = Bundle.main.object(forInfoDictionaryKey: "VaultEnvironment") as? String == "development" ? "development" : "production"
+    let group = "group.com.adamancia.vault" + (environment == "development" ? ".development" : "")
+    let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group)
+    let result: [String: Any] = ["environment": environment, "appGroupAvailable": container != nil,
+                                "proofMaterialAvailable": container.map { FileManager.default.isReadableFile(atPath: $0.appendingPathComponent("safari-local-hub-secret-v4").path) } ?? false]
+    let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
+    print(String(data: data, encoding: .utf8)!)
+    exit(0)
+}
+if CommandLine.arguments.contains("--extension-state") {
+    let identifier = Bundle.main.object(forInfoDictionaryKey: "VaultExtensionIdentifier") as? String ?? "com.adamancia.vault.safari.extension"
+    SFSafariExtensionManager.getStateOfSafariExtension(withIdentifier: identifier) { state, error in
+        let result: [String: Any] = ["extension": identifier, "enabled": state?.isEnabled ?? false,
+                                    "error": error.map { String(describing: $0) } ?? ""]
+        if let data = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]),
+           let text = String(data: data, encoding: .utf8) { print(text) }
+        exit(error == nil ? 0 : 1)
+    }
+    RunLoop.main.run()
+}
+let application = NSApplication.shared
+let delegate = SafariVaultAppDelegate()
+application.delegate = delegate
+application.run()
