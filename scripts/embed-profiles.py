@@ -5,6 +5,7 @@ import pathlib
 import plistlib
 import subprocess
 import sys
+import tempfile
 
 
 def validate_profile(data, bundle_id, group, previous_team=None):
@@ -24,6 +25,9 @@ def validate_profile(data, bundle_id, group, previous_team=None):
         raise ValueError('The provisioning profile does not authorize this Safari bundle identifier.')
     if group not in entitlements.get('com.apple.security.application-groups', []):
         raise ValueError('The provisioning profile does not authorize the shared Vault App Group.')
+    certificates = data.get('DeveloperCertificates', [])
+    if not certificates or not all(isinstance(certificate, bytes) for certificate in certificates):
+        raise ValueError('The provisioning profile does not authorize a signing certificate.')
     expiration = data.get('ExpirationDate')
     if isinstance(expiration, datetime.datetime) and expiration.tzinfo is None:
         expiration = expiration.replace(tzinfo=datetime.timezone.utc)
@@ -33,11 +37,15 @@ def validate_profile(data, bundle_id, group, previous_team=None):
 
 
 def main():
-    if len(sys.argv) != 6:
+    arguments = sys.argv[1:]
+    verify = bool(arguments and arguments[0] == '--verify')
+    if verify:
+        arguments.pop(0)
+    if len(arguments) != 5:
         raise SystemExit('Expected app, extension, App Group, app profile and extension profile.')
-    app, extension = map(pathlib.Path, sys.argv[1:3])
-    group = sys.argv[3]
-    app_profile, extension_profile = map(pathlib.Path, sys.argv[4:])
+    app, extension = map(pathlib.Path, arguments[:2])
+    group = arguments[2]
+    app_profile, extension_profile = map(pathlib.Path, arguments[3:])
     team = None
     prepared = []
     for bundle, profile in [(app, app_profile), (extension, extension_profile)]:
@@ -50,7 +58,24 @@ def main():
         signing_entitlements = plistlib.loads((app.parent / 'SafariVault.entitlements').read_bytes())
         signing_entitlements['com.apple.application-identifier'] = expected
         signing_entitlements['com.apple.developer.team-identifier'] = team
+        if verify:
+            signature = subprocess.run(['codesign', '-dv', '--verbose=4', str(bundle)], capture_output=True, text=True, check=True)
+            signed_team = next((line.partition('=')[2] for line in signature.stderr.splitlines() if line.startswith('TeamIdentifier=')), '')
+            if signed_team != team:
+                raise ValueError('Safari signing identity and profile belong to different Apple developer teams.')
+            with tempfile.TemporaryDirectory(prefix='safari-signing-certificate-') as temporary:
+                prefix = pathlib.Path(temporary) / 'certificate'
+                subprocess.run(['codesign', '-d', '--extract-certificates', str(prefix), str(bundle)], capture_output=True, check=True)
+                if prefix.with_name(prefix.name + '0').read_bytes() not in data['DeveloperCertificates']:
+                    raise ValueError('The Safari provisioning profile does not authorize the actual signing certificate.')
+            actual = plistlib.loads(subprocess.run(['codesign', '-d', '--entitlements', ':-', str(bundle)], capture_output=True, check=True).stdout)
+            if any(actual.get(key) != value for key, value in signing_entitlements.items()):
+                raise ValueError('Safari bundle does not carry its expected authorized entitlements.')
+            if (bundle / 'Contents/embedded.provisionprofile').read_bytes() != profile.read_bytes():
+                raise ValueError('Safari bundle does not contain the selected provisioning profile.')
         prepared.append((bundle, profile, signing_entitlements))
+    if verify:
+        return
     # Validate both profiles before changing either bundle.
     for bundle, profile, entitlements in prepared:
         (bundle / 'Contents/embedded.provisionprofile').write_bytes(profile.read_bytes())
