@@ -85,7 +85,9 @@ sys.stdout.buffer.write(path.with_suffix('.plist').read_bytes())
 import os,pathlib,plistlib,sys
 args=sys.argv[1:]
 if '-dv' in args: print('TeamIdentifier='+os.environ.get('SAFARI_FIXTURE_TEAM','EXAMPLETEAM'),file=sys.stderr)
-elif '--extract-certificates' in args: pathlib.Path(args[args.index('--extract-certificates')+1]+'0').write_bytes(os.environ.get('SAFARI_FIXTURE_CERT','fixture authorized certificate').encode())
+elif any(arg.startswith('--extract-certificates') for arg in args):
+    assert len(args)==3 and args[0]=='-d' and args[1].startswith('--extract-certificates='), 'codesign requires its optional certificate prefix joined with ='
+    pathlib.Path(args[1].split('=',1)[1]+'0').write_bytes(os.environ.get('SAFARI_FIXTURE_CERT','fixture authorized certificate').encode())
 else:
     data=plistlib.loads((pathlib.Path(os.environ['SAFARI_FIXTURE_OUTPUT'])/(pathlib.Path(args[-1]).name+'.entitlements')).read_bytes())
     if os.environ.get('SAFARI_FIXTURE_UNSANDBOXED'): data['com.apple.security.app-sandbox']=False
