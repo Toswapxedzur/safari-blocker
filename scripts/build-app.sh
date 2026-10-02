@@ -91,11 +91,7 @@ codesign "${SIGN_FLAGS[@]}" --entitlements "$EXTENSION_ENTITLEMENTS" "$APPEX"
 codesign "${SIGN_FLAGS[@]}" --entitlements "$APP_ENTITLEMENTS" "$APP"
 codesign --verify --deep --strict "$APP"
 if [ "$IDENTITY" != - ]; then
-  SIGNED_TEAM="$(codesign -dv --verbose=4 "$APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
-  if [ "$SIGNED_TEAM" != "$(cat "$OUT/SafariVault.team")" ]; then
-    echo "Signing identity and provisioning profiles belong to different Apple developer teams." >&2
-    exit 2
-  fi
+  python3 "$ROOT/scripts/embed-profiles.py" --verify "$APP" "$APPEX" "$GROUP" "$APP_PROFILE" "$EXTENSION_PROFILE"
 fi
 # Ad-hoc outputs are development-only. Production distribution uses an explicit
 # Developer ID/App Store identity and the standard Apple notarization workflow.
