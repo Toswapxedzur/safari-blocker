@@ -6,7 +6,7 @@ Read the group `AGENTS.md` and `../misc/project-memory/PROJECT-MEMORY.md` before
 - `Sources/` holds the separate containing app, native app-extension handler, independent custom-rule runtime, and selected-folder broker. These have no Mac Vault build dependency.
 - `scripts/build-app.sh` builds the containing app and `.appex` with Command Line Tools. `run-safari-vault.sh` is the supported development launcher.
 - `Tests/` exercises native runtime/state/file security and packaging contracts on mini1. Live enabling and website access remain owner-controlled Safari settings.
-- `build.sh` regenerates production assets by default; `--environment development` produces an isolated native development environment. `sync-engine.sh` is the existing Mac engine-copy helper for shared Mac source generation.
+- `build.sh` regenerates production assets by default; `--environment development` produces an isolated native development environment. The standalone native build embeds both custom-rule engine files directly from canonical browser source.
 - `README.md` explains build, onboarding, independent rules, authentication, and verification limits.
 - Public version follows `customBlocker/manifest.safari.json`; no release version bump is implied by this port.
 
