@@ -1,22 +1,13 @@
-# safariBlocker — Safari Vault (Safari repackaging of customBlocker)
+# safariBlocker — Safari Vault
 
-> 🤖 **AI protocol:** Read `../package-info.md` (group), the group `AGENTS.md`, and `../misc/project-memory/PROJECT-MEMORY.md` before working here. Update this file when the folder changes. Never delete without owner consent; keep secrets out of git.
+Read the group `AGENTS.md` and `../misc/project-memory/PROJECT-MEMORY.md` before working here.
 
-- **Growing editor lists (owner 2026-10-01):** regenerated from the shared bounded-list UI. Navigation, sites/apps, creator filters and tag suggestions stay inside scroll containers; no entries are truncated.
+- `extension/` is generated from canonical `customBlocker` browser source by `build.sh`; never hand edit it. It includes the same Classifier collectors, tagging UI and Activity feeder as Chrome, plus Safari lifecycle wake messages and an explicit native environment identity.
+- `Sources/` holds the separate containing app, native app-extension handler, independent custom-rule runtime, and selected-folder broker. These have no Mac Vault build dependency.
+- `scripts/build-app.sh` builds the containing app and `.appex` with Command Line Tools. `run-safari-vault.sh` is the supported development launcher.
+- `Tests/` exercises native runtime/state/file security and packaging contracts on mini1. Live enabling and website access remain owner-controlled Safari settings.
+- `build.sh` regenerates production assets by default; `--environment development` produces an isolated native development environment. `sync-engine.sh` is the existing Mac engine-copy helper for shared Mac source generation.
+- `README.md` explains build, onboarding, independent rules, authentication, and verification limits.
+- Public version follows `customBlocker/manifest.safari.json`; no release version bump is implied by this port.
 
-- **Custom-rule logs (owner 2026-10-01):** the Log panel contains only `v.log()` output, independently retained by immutable group ID (200 entries per rule). Clear and Download operate on the selected rule. Engine errors and collection/transport diagnostics stay in developer diagnostics. Browser feed tests: `customBlocker/tests/runner-rule-log-isolation.js`; native persistence tests: `macosBlocker/Tests/RuleLogShim.test.js`.
-
-- **What:** the Safari front of the extension (public name **Safari Vault**). Not a re-implementation: `extension/` is a **generated unpack** of customBlocker's `safari` package target. Custom-rule groups are forwarded over native messaging to Mac Vault, which runs the verbatim engine in JavaScriptCore.
-- **Own git repo:** `Toswapxedzur/safari-blocker`, branch `main`; version = `customBlocker/manifest.safari.json` (2.4.0); tags mirror the extension version each rebuild was made from.
-- **Scripts:** `sync-engine.sh` copies `rule-core.js` + `event-sandbox.js` into macosBlocker Resources (macosBlocker's `sync-webui.sh` copies them too); `build.sh` runs `customBlocker/tools/package.py --target safari` and regenerates `extension/`, then prints the `safari-web-extension-converter` wrapping steps. Rerun both whenever customBlocker changes; never hand-edit `extension/`.
-- **No automated tests** here; the engine is covered by customBlocker's suite and macosBlocker's Swift tests.
-
-- **English preparation (2026-10-01):** Generated editor is refreshed from the accepted shared browser code, including English terminology and the current custom-rule manual. No hand edits to extension/.
-
-- **Info explanations (2026-10-01):** English Info assets and source annotations are generated through the shared browser package; non-English layouts keep inline help.
-
-- **Field Info (2026-10-02):** 10px blue-gray icons retain a 24px invisible hit area. English field explanations are explicit; built-in settings, names, switches, searches and picker fields use the shared component. Other locales retain inline help.
-
-- **Compact Info (2026-10-02):** 10px icons retain a 24px click area; explanations use 12px text in a softly shaded, 260px-wide popup with tighter padding. English search copy is concise.
-
-- Generated English user and code guides are separate in `extension/{manual,code-manual}/`; Copy code docs uses the browser API, including Safari’s native custom-rule transport. Regenerate with `build.sh` from the shared browser source.
+Shared editor assets preserve current accepted translations, growing scrollable lists, per-group `v.log` logs, floating menus, and compact English Info explanations. Custom-rule engine errors remain developer diagnostics rather than rule logs.
