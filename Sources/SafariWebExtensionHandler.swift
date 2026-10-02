@@ -3,6 +3,23 @@ import Foundation
 import SafariServices
 import Darwin
 
+enum SafariProfileContext {
+    // Safari 17 also provides profiles on macOS 13. The SDK annotates this
+    // exported constant with macOS 14 availability, so resolve its actual
+    // presence in the loaded framework instead of using an OS-version gate.
+    static let metadataKey: String? = {
+        let defaultScope = UnsafeMutableRawPointer(bitPattern: -2) // Darwin RTLD_DEFAULT
+        guard let symbol = dlsym(defaultScope, "SFExtensionProfileKey"),
+              let value = symbol.assumingMemoryBound(to: UnsafeRawPointer?.self).pointee else { return nil }
+        return Unmanaged<NSString>.fromOpaque(value).takeUnretainedValue() as String
+    }()
+
+    static func identifier(userInfo: [AnyHashable: Any]?, metadataKey: String? = Self.metadataKey) -> String {
+        guard let metadataKey, let value = userInfo?[metadataKey] else { return "default" }
+        return String(describing: value)
+    }
+}
+
 @objc(SafariWebExtensionHandler)
 final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     private static let queue = DispatchQueue(label: "com.adamancia.vault.safari.rules")
@@ -16,10 +33,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             Self.respond(context, ["ok": false, "error": "Invalid native message."])
             return
         }
-        let profile: String
-        if #available(macOS 14.0, *), let value = item.userInfo?[SFExtensionProfileKey] {
-            profile = String(describing: value)
-        } else { profile = "default" }
+        let profile = SafariProfileContext.identifier(userInfo: item.userInfo)
         let type = message["type"] as? String ?? message["kind"] as? String ?? ""
         if type == "local-hub-challenge" { Self.respond(context, SafariConfiguration.proof(message: message)); return }
         if type == "safari-lifecycle-activate" {

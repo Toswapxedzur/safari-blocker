@@ -9,7 +9,7 @@ final class TestExtensionContext: NSExtensionContext {
     init(message: [String: Any], profile: String) {
         let item = NSExtensionItem()
         item.userInfo = [SFExtensionMessageKey: message]
-        if #available(macOS 14.0, *) { item.userInfo?[SFExtensionProfileKey] = profile }
+        if let key = SafariProfileContext.metadataKey { item.userInfo?[key] = profile }
         items = [item]
         super.init()
     }
@@ -58,6 +58,15 @@ func check(_ condition: @autoclosure () -> Bool, _ label: String) {
     if condition() { print("PASS \(label)") }
     else { print("FAIL \(label)"); failures += 1 }
 }
+let profileKey = SafariProfileContext.metadataKey
+check(profileKey != nil, "Safari 17 documented profile key resolves at runtime")
+let profileMetadata: [AnyHashable: Any] = [profileKey ?? "fixture-key": "profile-one"]
+check(SafariProfileContext.identifier(userInfo: profileMetadata) == "profile-one", "native profile metadata survives runtime availability lookup")
+check(SafariProfileContext.identifier(userInfo: [profileKey ?? "fixture-key": "profile-two"]) == "profile-two", "second native profile retains distinct identity")
+check(SafariProfileContext.identifier(userInfo: profileMetadata, metadataKey: nil) == "default", "absent framework export uses the single-profile default")
+check(SafariProfileContext.identifier(userInfo: [:]) == "default", "messages without profile metadata use the single-profile default")
+let profileUUID = UUID()
+check(SafariProfileContext.identifier(userInfo: [profileKey ?? "fixture-key": profileUUID]) == String(describing: profileUUID), "Safari UUID metadata retains its exact profile identity")
 let resources = Bundle.main.resourceURL!
 let directory = FileManager.default.temporaryDirectory.appendingPathComponent("safari-native-tests-" + UUID().uuidString, isDirectory: true)
 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
