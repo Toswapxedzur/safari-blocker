@@ -14,7 +14,9 @@ with tempfile.TemporaryDirectory(prefix='safari-native-process-') as directory:
         try: answer=json.loads(result.stdout.strip().splitlines()[-1])
         except Exception: raise AssertionError('native request missing reply: '+result.stdout+' '+result.stderr)
         return answer,result.returncode,time.monotonic()-start
-    def rule(payload,**kw): return request({'type':'event-sandbox-request','payload':payload},**kw)
+    active_groups=['a-healthy','z-hang','registration-hang']
+    def rule(payload,group_ids=None,**kw):
+        return request({'type':'event-sandbox-request','payload':dict(payload,groupIds=active_groups if group_ids is None else group_ids)},**kw)
     tick={'kind':'dispatch-event','descriptor':{'type':'tick','now':1000,'data':{'tabId':4}}}
     source="(on,v)=>on('tick',()=>{v.state.n=(v.state.n||0)+1;v.log(v.state.n)})"
     answer,code,_=rule({'kind':'load-source','groupId':'a-healthy','source':source,'state':{'n':10}})
@@ -41,6 +43,42 @@ with tempfile.TemporaryDirectory(prefix='safari-native-process-') as directory:
     check(answer['result']['quarantine']['groupId']=='registration-hang' and code==124 and duration<3,'registration infinite loop is hard quarantined')
     answer,code,duration=rule({'kind':'load-source','groupId':'registration-hang','source':registration,'state':{}})
     check(answer['result']['ok']==False and code==0 and duration<1.2,'failed registration hash prevents cold restart loop')
+    answer,code,_=rule(tick,group_ids=['a-healthy'])
+    check(answer['result']['ok'] and set(answer['result']['states'])=={'a-healthy'} and not answer['result'].get('quarantine'),
+          'cold deletion prunes stale sources and quarantine before restore')
+    answer,code,_=rule(tick,group_ids=[])
+    check(answer['result']['ok'] and not answer['result']['states'] and not answer['result']['logs'],
+          'reset-to-empty storage cannot resurrect native groups')
+    answer,code,_=rule(tick)
+    check(answer['result']['ok'] and not answer['result']['states'],
+          'pruned source cannot reappear in a later cold process')
+    answer,code,_=request({'type':'event-sandbox-request','payload':tick})
+    check(answer['ok']==False and code==0,'missing authoritative roster fails closed')
+    # Simulate a stale journal whose registration code would hang if restored.
+    import hashlib
+    journal=pathlib.Path(directory)/('rules-'+hashlib.sha256(b'profile-deleted').hexdigest()+'.json')
+    journal.write_text(json.dumps({'version':1,'groups':{'deleted':{'source':registration,'state':{},'suppressed':False}},'quarantine':{},'quarantinedSources':{}}))
+    answer,code,duration=rule(tick,group_ids=[],profile='profile-deleted')
+    check(answer['result']['ok'] and code==0 and duration<1.2,
+          'deleted infinite source is pruned before registration can execute')
+    deleted_load={'kind':'load-source','groupId':'deleted','source':registration,'state':{}}
+    answer,code,duration=rule(deleted_load,group_ids=[],profile='profile-racing-delete')
+    check(not answer['ok'] and code==0 and duration<1.2,
+          'cold stale load refuses absent group before source evaluation')
+    messages=[
+        {'type':'event-sandbox-request','payload':dict(kind='load-source',groupId='deleted',source=source,state={},groupIds=['deleted'])},
+        {'type':'event-sandbox-request','payload':dict(deleted_load,groupIds=[])},
+        {'type':'event-sandbox-request','payload':dict(tick,groupIds=[])},
+    ]
+    result=subprocess.run([str(binary),'--native-messages'],input=json.dumps(messages),text=True,capture_output=True,
+                          env=dict(env,SAFARI_TEST_PROFILE='profile-warm-delete'),timeout=5)
+    replies=[json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
+    check(result.returncode==0 and len(replies)==3 and replies[0]['result']['ok'] and not replies[1]['ok']
+          and not replies[2]['result']['states'] and not replies[2]['result']['logs'],
+          'warm stale load cannot reinsert a deleted source or produce actions')
+    answer,code,_=rule(tick,group_ids=['deleted'],profile='profile-warm-delete')
+    check(answer['result']['ok'] and not answer['result']['states'] and code==0,
+          'refused warm source remains absent after a cold restart')
     answer,code,_=request({'kind':'local-hub-challenge' ,'v':4,'program':'chrome','challenge':'a'*43})
     check(answer['ok']==False and code==0,'Safari native endpoint refuses Chromium impersonation')
 print('SAFARI_PROCESS_RESULT: OK')

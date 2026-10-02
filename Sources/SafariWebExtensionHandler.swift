@@ -60,14 +60,33 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         }
     }
     private static func handleRule(_ context: NSExtensionContext, profile: String, payload: [String: Any]) {
+        guard let groupIDs = payload["groupIds"] as? [String],
+              groupIDs.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 256 }) else {
+            respond(context, ["ok": false, "error": "An authoritative custom-group roster is required."])
+            return
+        }
+        if payload["kind"] as? String == "load-source" {
+            guard let group = payload["groupId"] as? String, groupIDs.contains(group) else {
+                respond(context, ["ok": false, "error": "The custom group no longer exists."])
+                return
+            }
+        }
         let fence = RequestFence(context: context)
         do {
             // The fence is active during restore as well: a crashing previous
             // process cannot leave a source that hangs every future request.
             let runtime: ProfileRuntime
-            if let existing = profiles[profile] { runtime = existing }
+            if let existing = profiles[profile] {
+                runtime = existing
+                fence.journal = runtime.journal
+                fence.start()
+                for group in try runtime.journal.reconcile(Set(groupIDs)) {
+                    _ = try runtime.engine.handle(["kind": "unload-group", "groupId": group])
+                }
+            }
             else {
                 let journal = try SafariRuleJournal(directory: SafariConfiguration.ruleDirectory, profile: profile)
+                _ = try journal.reconcile(Set(groupIDs))
                 fence.journal = journal
                 let engine = try SafariRuleEngine(resources: Bundle.main.resourceURL!)
                 engine.onGroup = { fence.group = $0 }

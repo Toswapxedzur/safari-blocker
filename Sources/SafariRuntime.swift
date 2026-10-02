@@ -67,6 +67,21 @@ final class SafariRuleJournal {
         }
     }
     private let lock = NSRecursiveLock()
+    /// Browser storage is authoritative. A killed background or storage reset
+    /// may have missed its unload message; never restore those stale sources.
+    func reconcile(_ groupIDs: Set<String>) throws -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        let retained = Set(groups.keys).union(quarantine.keys).union(quarantinedSources.keys)
+        let removed = retained.subtracting(groupIDs)
+        guard !removed.isEmpty else { return [] }
+        for group in removed {
+            groups.removeValue(forKey: group)
+            quarantine.removeValue(forKey: group)
+            quarantinedSources.removeValue(forKey: group)
+        }
+        try save()
+        return removed.sorted()
+    }
     func commit(payload: [String: Any], result: [String: Any]) throws {
         lock.lock(); defer { lock.unlock() }
         let kind = payload["kind"] as? String ?? ""
