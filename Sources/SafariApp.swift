@@ -21,6 +21,8 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 530, height: 380), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "Safari Vault"
+        window.appearance = NSAppearance(named: .aqua)
+        window.backgroundColor = NSColor(calibratedRed: 0.973, green: 0.980, blue: 0.988, alpha: 1)
         window.center()
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -28,15 +30,26 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
         stack.spacing = 18
         stack.translatesAutoresizingMaskIntoConstraints = false
         let title = NSTextField(labelWithString: "Safari Vault")
-        title.font = .systemFont(ofSize: 26, weight: .semibold)
+        title.font = NSFont(name: "Arial Bold", size: 26) ?? .systemFont(ofSize: 26, weight: .semibold)
         let body = NSTextField(wrappingLabelWithString: SafariNativeLanguage.text("safari.setup.body", fallback: "Enable Safari Vault in Safari Extensions, then allow access to all websites. Browser blocking and custom rules work independently. Connect Mac Vault for tagging, shared groups and Activity."))
-        body.font = .systemFont(ofSize: 14)
+        body.font = NSFont(name: "Arial", size: 14) ?? .systemFont(ofSize: 14)
         body.alignment = SafariNativeLanguage.language == "ar" ? .right : .left
         let button = NSButton(title: SafariNativeLanguage.text("safari.setup.open", fallback: "Open Safari Extensions"), target: self, action: #selector(openPreferences))
-        button.bezelStyle = .rounded
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.backgroundColor = NSColor(calibratedRed: 0.118, green: 0.227, blue: 0.541, alpha: 1).cgColor
+        button.layer?.cornerRadius = 18
+        button.font = NSFont(name: "Arial Bold", size: 14)
+        button.contentTintColor = .white
+        button.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        button.widthAnchor.constraint(greaterThanOrEqualToConstant: button.intrinsicContentSize.width + 28).isActive = true
         status = NSTextField(wrappingLabelWithString: "")
-        status.font = .systemFont(ofSize: 12)
+        status.font = NSFont(name: "Arial", size: 12) ?? .systemFont(ofSize: 12)
         status.alignment = SafariNativeLanguage.language == "ar" ? .right : .left
+        title.textColor = NSColor(calibratedRed: 0.118, green: 0.161, blue: 0.231, alpha: 1)
+        body.textColor = title.textColor
+        status.textColor = NSColor(calibratedRed: 0.392, green: 0.455, blue: 0.545, alpha: 1)
         stack.addArrangedSubview(title); stack.addArrangedSubview(body)
         stack.addArrangedSubview(button); stack.addArrangedSubview(status)
         window.contentView?.addSubview(stack)
