@@ -12,7 +12,7 @@ with (pathlib.Path(sys.argv[1])/'Contents/Info.plist').open('wb') as f:
                   'CFBundlePackageType':'APPL','VaultEnvironment':'development'},f)
 PY
 xcrun swiftc -D SAFARI_TESTING -sdk "$(xcrun --sdk macosx --show-sdk-path)" -application-extension \
-  "$ROOT/Sources/SafariRuntime.swift" "$ROOT/Sources/SafariFileBroker.swift" "$ROOT/Sources/SafariWebExtensionHandler.swift" \
+  "$ROOT/Sources/SafariRuntime.swift" "$ROOT/Sources/SafariNativeLanguage.swift" "$ROOT/Sources/SafariFileBroker.swift" "$ROOT/Sources/SafariWebExtensionHandler.swift" \
   "$ROOT/Tests/main.swift" -o "$APP/Contents/MacOS/SafariNativeTests"
 "$APP/Contents/MacOS/SafariNativeTests"
 python3 "$ROOT/Tests/native-process.py" "$APP/Contents/MacOS/SafariNativeTests"
