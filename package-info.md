@@ -10,6 +10,6 @@ Read the group `AGENTS.md` and `../misc/project-memory/PROJECT-MEMORY.md` before
 - `README.md` explains build, onboarding, independent rules, authentication, and verification limits.
 - Public version follows `customBlocker/manifest.safari.json`; no release version bump is implied by this port.
 
-Shared editor assets preserve current accepted translations, growing scrollable lists, per-group `v.log` logs, floating menus, and compact English Info explanations. Custom-rule engine errors remain developer diagnostics rather than rule logs.
+Shared editor assets preserve current accepted translations, growing scrollable lists, per-group `v.log` logs, floating menus, and localized Info explanations for the fixed20 app languages. Custom-rule engine errors remain developer diagnostics rather than rule logs.
 
 - `Assets/Branding/`: selected Safari 05 compass vector, native ICNS/master, and browser aliases. `build.sh` overlays these after generating shared assets; the native build embeds SafariVault.icns.
