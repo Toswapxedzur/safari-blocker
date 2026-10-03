@@ -40,6 +40,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APPEX/Contents/MacOS" "$APPEX/Contents/Resources"
 cp "$ROOT/Assets/Branding/safari-vault.icns" "$APP/Contents/Resources/SafariVault.icns"
 cp -R "$EXTENSION/." "$APPEX/Contents/Resources/"
+cp -R "$EXTENSION/translation" "$APP/Contents/Resources/translation"
 # These remain exact copies of the canonical custom-rule engine.
 cp "$ROOT/../customBlocker/rule-core.js" "$ROOT/../customBlocker/event-sandbox.js" "$APPEX/Contents/Resources/"
 python3 - "$APP" "$APPEX" "$BUNDLE" "$GROUP" "$ENVIRONMENT" "$NAME" <<'PY'
@@ -66,11 +67,11 @@ ARCHES=("$ARCH")
 if [ "$ARCH" = universal ]; then ARCHES=(x86_64 arm64); fi
 for BUILD_ARCH in "${ARCHES[@]}"; do
   xcrun swiftc -sdk "$SDK" -target "$BUILD_ARCH-apple-macos13.0" -O -parse-as-library \
-    -module-name SafariVault "$ROOT/Sources/SafariApp.swift" "$ROOT/Sources/SafariHeartbeatGate.swift" \
+    -module-name SafariVault "$ROOT/Sources/SafariApp.swift" "$ROOT/Sources/SafariHeartbeatGate.swift" "$ROOT/Sources/SafariNativeLanguage.swift" \
     -o "$OUT/SafariVault-$BUILD_ARCH"
   xcrun swiftc -sdk "$SDK" -target "$BUILD_ARCH-apple-macos13.0" -O -application-extension \
     -parse-as-library -module-name SafariVaultExtension \
-    "$ROOT/Sources/SafariRuntime.swift" "$ROOT/Sources/SafariFileBroker.swift" "$ROOT/Sources/SafariWebExtensionHandler.swift" \
+    "$ROOT/Sources/SafariRuntime.swift" "$ROOT/Sources/SafariNativeLanguage.swift" "$ROOT/Sources/SafariFileBroker.swift" "$ROOT/Sources/SafariWebExtensionHandler.swift" \
     -Xlinker -e -Xlinker _NSExtensionMain -o "$OUT/SafariVaultExtension-$BUILD_ARCH"
 done
 if [ "$ARCH" = universal ]; then
