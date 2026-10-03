@@ -19,7 +19,7 @@ final class SafariFileBroker {
     func choose(completion: @escaping ([String: Any]) -> Void) {
         DispatchQueue.main.async {
             let panel = NSOpenPanel()
-            panel.title = "Choose a folder for Safari Vault custom rules"
+            panel.title = SafariNativeLanguage.text("safari.folderTitle", fallback: "Choose a folder for Safari Vault custom rules")
             panel.canChooseFiles = false
             panel.canChooseDirectories = true
             panel.allowsMultipleSelection = false

@@ -19,22 +19,24 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
     }
     private func showOnboarding() {
         NSApp.setActivationPolicy(.regular)
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 530, height: 300), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 530, height: 380), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "Safari Vault"
         window.center()
         let stack = NSStackView()
         stack.orientation = .vertical
-        stack.alignment = .leading
+        stack.alignment = SafariNativeLanguage.language == "ar" ? .trailing : .leading
         stack.spacing = 18
         stack.translatesAutoresizingMaskIntoConstraints = false
         let title = NSTextField(labelWithString: "Safari Vault")
         title.font = .systemFont(ofSize: 26, weight: .semibold)
-        let body = NSTextField(wrappingLabelWithString: "Enable Safari Vault in Safari Extensions, then allow access to all websites. Browser blocking and custom rules work independently. Connect Mac Vault for tagging, shared groups and Activity.")
+        let body = NSTextField(wrappingLabelWithString: SafariNativeLanguage.text("safari.setup.body", fallback: "Enable Safari Vault in Safari Extensions, then allow access to all websites. Browser blocking and custom rules work independently. Connect Mac Vault for tagging, shared groups and Activity."))
         body.font = .systemFont(ofSize: 14)
-        let button = NSButton(title: "Open Safari Extensions", target: self, action: #selector(openPreferences))
+        body.alignment = SafariNativeLanguage.language == "ar" ? .right : .left
+        let button = NSButton(title: SafariNativeLanguage.text("safari.setup.open", fallback: "Open Safari Extensions"), target: self, action: #selector(openPreferences))
         button.bezelStyle = .rounded
         status = NSTextField(wrappingLabelWithString: "")
         status.font = .systemFont(ofSize: 12)
+        status.alignment = SafariNativeLanguage.language == "ar" ? .right : .left
         stack.addArrangedSubview(title); stack.addArrangedSubview(body)
         stack.addArrangedSubview(button); stack.addArrangedSubview(status)
         window.contentView?.addSubview(stack)
@@ -50,7 +52,7 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openPreferences() {
         SFSafariApplication.showPreferencesForExtension(withIdentifier: extensionID) { [weak self] error in
             DispatchQueue.main.async {
-                if error != nil { self?.status.stringValue = "Safari could not open the extension settings. Open Safari Settings → Extensions." }
+                if error != nil { self?.status.stringValue = SafariNativeLanguage.text("safari.setup.openFailed", fallback: "Safari could not open the extension settings. Open Safari Settings → Extensions.") }
                 else { self?.refreshState() }
             }
         }
@@ -65,8 +67,8 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.heartbeatGate.completeStateQuery(query, enabled: error == nil ? state?.isEnabled : nil)
                 self.status?.stringValue = self.heartbeatGate.extensionEnabled == true
-                    ? "Safari Vault is enabled. Allow access to all websites in Safari's extension settings."
-                    : "Enable Safari Vault and allow access to all websites in Safari's extension settings."
+                    ? SafariNativeLanguage.text("safari.setup.enabled", fallback: "Safari Vault is enabled. Allow access to all websites in Safari's extension settings.")
+                    : SafariNativeLanguage.text("safari.setup.disabled", fallback: "Enable Safari Vault and allow access to all websites in Safari's extension settings.")
                 self.pulse()
             }
         }
