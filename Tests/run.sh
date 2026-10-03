@@ -17,6 +17,7 @@ xcrun swiftc -D SAFARI_TESTING -sdk "$(xcrun --sdk macosx --show-sdk-path)" -app
 "$APP/Contents/MacOS/SafariNativeTests"
 python3 "$ROOT/Tests/native-process.py" "$APP/Contents/MacOS/SafariNativeTests"
 python3 "$ROOT/Tests/profiles.py"
+python3 "$ROOT/Tests/native-language.py"
 xcrun swiftc -sdk "$(xcrun --sdk macosx --show-sdk-path)" -application-extension -parse-as-library \
   "$ROOT/Sources/SafariHeartbeatGate.swift" "$ROOT/Tests/heartbeat.swift" -o "$OUT/SafariHeartbeatGateTests"
 "$OUT/SafariHeartbeatGateTests"
