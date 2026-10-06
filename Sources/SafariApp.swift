@@ -150,6 +150,18 @@ struct SafariVaultMain {
             RunLoop.main.run()
         }
         let application = NSApplication.shared
+        // Programmatic AppKit applications need an explicit menu to route ⌘Q.
+        // Closing onboarding still keeps the existing background heartbeat.
+        let menu = NSMenu()
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu(title: "Safari Vault")
+        let quit = NSMenuItem(title: SafariNativeLanguage.text("safari.app.quit", fallback: "Quit Safari Vault"),
+                              action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = application
+        appMenu.addItem(quit)
+        appMenuItem.submenu = appMenu
+        menu.addItem(appMenuItem)
+        application.mainMenu = menu
         let delegate = SafariVaultAppDelegate()
         application.delegate = delegate
         withExtendedLifetime(delegate) { application.run() }
