@@ -14,7 +14,7 @@ Shared editor assets preserve current accepted translations, growing scrollable 
 
 - `Assets/Branding/`: selected Safari 05 compass vector, native ICNS/master, and browser aliases. `build.sh` overlays these after generating shared assets; the native build embeds SafariVault.icns.
 
-- `VERSIONS.md`: owner-approved 2026-10-04 capability split; current source version **3.1.3 alpha**. Historical tags/packages remain immutable.
+- `VERSIONS.md`: owner-approved 2026-10-04 capability split; current source version **3.1.4 alpha**. Historical tags/packages remain immutable.
 
 - Public customer audit on owner-selected mini2 reproduces and verifies website recording off-to-on transitions. Generated feeder regression lives in canonical `customBlocker/tests/runner-activity-resume.js`.
 
