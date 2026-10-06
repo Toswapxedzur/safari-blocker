@@ -18,12 +18,27 @@ final class SafariFileBroker {
     }
     func choose(completion: @escaping ([String: Any]) -> Void) {
         DispatchQueue.main.async {
+            // Native extension processes normally prohibit visible windows. A
+            // user-initiated folder grant temporarily needs an accessory UI.
+            let application = NSApplication.shared
+            let previousPolicy = application.activationPolicy()
+            if previousPolicy == .prohibited {
+                application.setActivationPolicy(.accessory)
+            }
+            defer {
+                if previousPolicy == .prohibited {
+                    application.setActivationPolicy(previousPolicy)
+                }
+            }
             let panel = NSOpenPanel()
             panel.title = SafariNativeLanguage.text("safari.folderTitle", fallback: "Choose a folder for Safari Vault custom rules")
             panel.canChooseFiles = false
             panel.canChooseDirectories = true
             panel.allowsMultipleSelection = false
             panel.canCreateDirectories = true
+            application.activate(ignoringOtherApps: true)
+            panel.level = .modalPanel
+            panel.makeKeyAndOrderFront(nil)
             guard panel.runModal() == .OK, let root = panel.url else {
                 completion(self.status())
                 return
