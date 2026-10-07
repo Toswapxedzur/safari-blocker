@@ -39,6 +39,9 @@ final class SafariFileBroker {
             application.activate(ignoringOtherApps: true)
             panel.level = .modalPanel
             panel.makeKeyAndOrderFront(nil)
+            // An extension has no document window to supply AppKit's usual
+            // placement; keep the picker and its buttons on the active screen.
+            panel.center()
             guard panel.runModal() == .OK, let root = panel.url else {
                 completion(self.status())
                 return

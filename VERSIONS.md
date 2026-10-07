@@ -2,7 +2,12 @@
 
 The owner approved this capability split on 2026-10-04. Existing tags and packaged downloads remain unchanged. All new records are **alpha, source-only**. A source record does not certify store submission, signing or native release acceptance.
 
-Current source version: **3.1.4**. See the group-level `CHANGELOG.md` for the cross-product chapters.
+Current source version: **3.1.5**. See the group-level `CHANGELOG.md` for the cross-product chapters.
+
+## 3.1.5 — 2026-10-07 — Folder picker placement
+
+- Center the native extension folder picker so its Open and Cancel buttons remain visible.
+- Retain normal Quit, explicit folder grants and bounded file operations.
 
 ## 3.1.4 — 2026-10-07 — Visible native folder picker
 
