@@ -14,6 +14,24 @@ with tempfile.TemporaryDirectory(prefix='safari-native-process-') as directory:
         try: answer=json.loads(result.stdout.strip().splitlines()[-1])
         except Exception: raise AssertionError('native request missing reply: '+result.stdout+' '+result.stderr)
         return answer,result.returncode,time.monotonic()-start
+    # Actual native endpoint stages across requests in one handler process.
+    staged_group='staged'
+    counter="(on,v)=>{v.state.run=(v.state.run||0)+1;}"
+    def staged_message(kind, **fields):
+        return {'type':'event-sandbox-request','payload':dict(kind=kind,groupId=staged_group,groupIds=[staged_group],**fields)}
+    staged_messages=[staged_message('prepare-source',source=counter,state={}),
+                     staged_message('commit-source',token='$previousToken'),
+                     staged_message('prepare-source',source=counter,state={'run':1}),
+                     staged_message('commit-source',token='$previousToken')]
+    staged_run=subprocess.run([str(binary),'--native-messages'],input=json.dumps(staged_messages),text=True,capture_output=True,
+                              env=dict(env,SAFARI_TEST_PROFILE='staged-profile'),timeout=5)
+    staged_replies=[json.loads(line) for line in staged_run.stdout.splitlines()]
+    check(staged_run.returncode==0 and staged_replies[-1]['result']['states']['staged']['run']==2,
+          'actual native staged transport retains initialization memory across Runs')
+    answer,code,_=request(staged_message('prepare-source',source="(on,v)=>{v.state.uncommitted=true;}",state={}),profile='uncommitted-profile')
+    check(answer['result']['ok'] and code==0,'native process can exit with a prepared uncommitted candidate')
+    answer,code,_=request(staged_message('dispatch-event',descriptor={'type':'tick'}),profile='uncommitted-profile')
+    check(answer['result']['states']=={} and code==0,'cold handler never replays an uncommitted source')
     active_groups=['a-healthy','z-hang','registration-hang']
     def rule(payload,group_ids=None,**kw):
         return request({'type':'event-sandbox-request','payload':dict(payload,groupIds=active_groups if group_ids is None else group_ids)},**kw)

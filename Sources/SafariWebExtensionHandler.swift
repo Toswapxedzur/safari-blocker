@@ -79,7 +79,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             respond(context, ["ok": false, "error": "An authoritative custom-group roster is required."])
             return
         }
-        if payload["kind"] as? String == "load-source" {
+        if ["load-source", "prepare-source", "commit-source"].contains(payload["kind"] as? String ?? "") {
             guard let group = payload["groupId"] as? String, groupIDs.contains(group) else {
                 respond(context, ["ok": false, "error": "The custom group no longer exists."])
                 return
@@ -112,22 +112,21 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             fence.journal = runtime.journal
             runtime.engine.onGroup = { fence.group = $0 }
             fence.start()
-            if payload["kind"] as? String == "load-source", let group = payload["groupId"] as? String,
+            if ["load-source", "prepare-source"].contains(payload["kind"] as? String ?? ""), let group = payload["groupId"] as? String,
                runtime.journal.wasQuarantined(group, source: payload["source"] as? String ?? ""),
                payload["run"] as? Bool != true {
                 fence.finish(["ok": true, "result": ["ok": false, "quarantine": ["groupId": group, "reason": "native-hard-timeout"], "error": "The rule exceeded its execution deadline. Use Run to retry."]])
                 return
             }
-            if payload["kind"] as? String == "load-source" {
+            if ["load-source", "prepare-source"].contains(payload["kind"] as? String ?? "") {
                 fence.source = payload["source"] as? String
                 fence.group = payload["groupId"] as? String ?? ""
             }
-            var result = try runtime.engine.handle(payload)
+            var result = try runtime.engine.handleJournaled(payload, journal: runtime.journal)
             if payload["kind"] as? String == "dispatch-event", let group = runtime.journal.quarantine.keys.sorted().first {
                 result["quarantine"] = ["groupId": group, "reason": "native-hard-timeout"]
             }
             guard !fence.expired else { return }
-            try runtime.journal.commit(payload: payload, result: result)
             fence.finish(["ok": true, "result": result])
         } catch { fence.finish(["ok": false, "error": "Safari's native rule engine could not complete this request."]) }
     }

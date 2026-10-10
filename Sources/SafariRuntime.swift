@@ -84,30 +84,41 @@ final class SafariRuleJournal {
     }
     func commit(payload: [String: Any], result: [String: Any]) throws {
         lock.lock(); defer { lock.unlock() }
-        let kind = payload["kind"] as? String ?? ""
-        if let group = payload["groupId"] as? String, !group.isEmpty, group.utf8.count <= 256 {
-            if kind == "load-source", result["ok"] as? Bool == true {
-                let source = payload["source"] as? String ?? ""
-                if source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { groups.removeValue(forKey: group) }
-                else {
-                    groups[group] = ["source": source, "state": payload["state"] as? [String: Any] ?? [:],
-                                     "suppressed": groups[group]?["suppressed"] as? Bool ?? false]
+        let oldGroups = groups
+        let oldQuarantine = quarantine
+        let oldSources = quarantinedSources
+        do {
+            let kind = payload["kind"] as? String ?? ""
+            if let group = payload["groupId"] as? String, !group.isEmpty, group.utf8.count <= 256 {
+                if kind == "load-source", result["ok"] as? Bool == true {
+                    let source = payload["source"] as? String ?? ""
+                    if source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { groups.removeValue(forKey: group) }
+                    else {
+                        groups[group] = ["source": source, "state": payload["state"] as? [String: Any] ?? [:],
+                                         "suppressed": groups[group]?["suppressed"] as? Bool ?? false]
+                    }
+                    quarantine.removeValue(forKey: group)
+                    quarantinedSources.removeValue(forKey: group)
+                } else if kind == "unload-group" {
+                    groups.removeValue(forKey: group)
+                    quarantine.removeValue(forKey: group)
+                    quarantinedSources.removeValue(forKey: group)
+                } else if kind == "suppress-group", groups[group] != nil {
+                    groups[group]?["suppressed"] = payload["on"] as? Bool == true
                 }
-                quarantine.removeValue(forKey: group)
-                quarantinedSources.removeValue(forKey: group)
-            } else if kind == "unload-group" {
-                groups.removeValue(forKey: group)
-                quarantine.removeValue(forKey: group)
-                quarantinedSources.removeValue(forKey: group)
-            } else if kind == "suppress-group", groups[group] != nil {
-                groups[group]?["suppressed"] = payload["on"] as? Bool == true
             }
+            for (group, state) in result["states"] as? [String: [String: Any]] ?? [:] where groups[group] != nil {
+                groups[group]?["state"] = state
+            }
+            try save()
+        } catch {
+            groups = oldGroups
+            quarantine = oldQuarantine
+            quarantinedSources = oldSources
+            throw error
         }
-        for (group, state) in result["states"] as? [String: [String: Any]] ?? [:] where groups[group] != nil {
-            groups[group]?["state"] = state
-        }
-        try save()
     }
+
     func wasQuarantined(_ group: String, source: String) -> Bool {
         quarantine[group] != nil && (quarantinedSources[group] == SafariConfiguration.profileKey(source)
             || groups[group]?["source"] as? String == source)
@@ -137,6 +148,8 @@ final class SafariRuleEngine {
     private var result: [String: Any]?
     private var nextID = 0
     var onGroup: ((String) -> Void)?
+    private var pendingLoads: [String: (payload: [String: Any], result: [String: Any])] = [:]
+    private var pendingOrder: [String] = []
 
     init(resources: URL) throws {
         guard let context = JSContext() else { throw SafariRuntimeError.engineUnavailable }
@@ -179,10 +192,76 @@ final class SafariRuleEngine {
         guard let result else { throw SafariRuntimeError.invalidReply }
         return result
     }
+    /// Browser registration is staged until its source/memory write succeeds.
+    /// The native recovery journal is saved before activating that candidate.
+    func handleJournaled(_ payload: [String: Any], journal: SafariRuleJournal) throws -> [String: Any] {
+        let kind = payload["kind"] as? String ?? ""
+        if let roster = payload["groupIds"] as? [String] {
+            for token in pendingOrder where !roster.contains(pendingLoads[token]?.payload["groupId"] as? String ?? "") {
+                _ = try handle(["kind": "discard-source", "token": token])
+                pendingLoads.removeValue(forKey: token)
+            }
+            pendingOrder.removeAll { pendingLoads[$0] == nil }
+        }
+        if kind == "prepare-source" || kind == "load-source" {
+            var request = payload
+            request["kind"] = "prepare-source"
+            let prepared = try handle(request)
+            guard prepared["ok"] as? Bool == true, let token = prepared["token"] as? String else { return prepared }
+            let group = payload["groupId"] as? String ?? ""
+            for old in pendingOrder where pendingLoads[old]?.payload["groupId"] as? String == group { pendingLoads.removeValue(forKey: old) }
+            pendingOrder.removeAll { pendingLoads[$0] == nil }
+            while pendingOrder.count >= 64 { pendingLoads.removeValue(forKey: pendingOrder.removeFirst()) }
+            var committed = payload
+            committed["kind"] = "load-source"
+            pendingLoads[token] = (committed, prepared)
+            pendingOrder.append(token)
+            if kind == "prepare-source" { return prepared }
+            return try commitPrepared(token, group: group, journal: journal)
+        }
+        if kind == "commit-source" {
+            return try commitPrepared(payload["token"] as? String ?? "", group: payload["groupId"] as? String ?? "", journal: journal)
+        }
+        if kind == "discard-source" {
+            let token = payload["token"] as? String ?? ""
+            pendingLoads.removeValue(forKey: token)
+            pendingOrder.removeAll { $0 == token }
+            return try handle(payload)
+        }
+        if kind == "unload-group" {
+            let group = payload["groupId"] as? String ?? ""
+            for token in pendingOrder where pendingLoads[token]?.payload["groupId"] as? String == group { pendingLoads.removeValue(forKey: token) }
+            pendingOrder.removeAll { pendingLoads[$0] == nil }
+        }
+        let reply = try handle(payload)
+        try journal.commit(payload: payload, result: reply)
+        return reply
+    }
+    private func commitPrepared(_ token: String, group: String, journal: SafariRuleJournal) throws -> [String: Any] {
+        guard let candidate = pendingLoads[token], candidate.payload["groupId"] as? String == group else {
+            return ["ok": false, "error": "Prepared rule is no longer available."]
+        }
+        defer { pendingLoads.removeValue(forKey: token); pendingOrder.removeAll { $0 == token } }
+        // The save callback exists only during commit, after registration has
+        // finished. User initialization cannot invoke it before validation.
+        let save: @convention(block) () -> String? = {
+            do { try journal.commit(payload: candidate.payload, result: candidate.result); return nil }
+            catch { return "Safari's rule recovery journal could not be saved." }
+        }
+        context.setObject(save, forKeyedSubscript: "__safariCommitSave" as NSString)
+        defer { context.evaluateScript("delete globalThis.__safariCommitSave;") }
+        let literal = String(data: try JSONSerialization.data(withJSONObject: [token]), encoding: .utf8)!
+        let reply = context.evaluateScript("JSON.stringify(engine.commitLoad((\(literal))[0],()=>{const error=__safariCommitSave();if(error)throw Error(error);}));")
+        guard context.exception == nil, let json = reply?.toString(), let value = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any] else {
+            context.exception = nil
+            throw SafariRuntimeError.invalidReply
+        }
+        return value
+    }
     func restore(_ journal: SafariRuleJournal) throws {
         for group in journal.groups.keys.sorted() where journal.quarantine[group] == nil {
             guard let record = journal.groups[group] else { continue }
-            let result = try handle(["kind": "load-source", "groupId": group, "source": record["source"] ?? "", "state": record["state"] ?? [:]])
+            let result = try handleJournaled(["kind": "load-source", "groupId": group, "source": record["source"] ?? "", "state": record["state"] ?? [:]], journal: journal)
             guard result["ok"] as? Bool == true else { continue }
             if record["suppressed"] as? Bool == true { _ = try handle(["kind": "suppress-group", "groupId": group, "on": true]) }
         }
