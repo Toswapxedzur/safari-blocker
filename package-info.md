@@ -19,3 +19,5 @@ Shared editor assets preserve current accepted translations, growing scrollable 
 - Public customer audit on owner-selected mini2 reproduces and verifies website recording off-to-on transitions. Generated feeder regression lives in canonical `customBlocker/tests/runner-activity-resume.js`.
 
 - Public customer-audit patch 3.1.2 mirrors the dedicated Bilibili home-card author-name selector and preserves native authentication/permissions.
+
+- First-link recovery uses the canonical serialized contribution-before-adoption browser path. Generated `extension/background.js` preserves original Website entries and policy until the hub accepts the first contribution, including reconnects. Native hub changes are delivered by Mac Vault or Windows Vault separately; Store/public publication remains held.
