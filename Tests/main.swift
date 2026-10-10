@@ -5,7 +5,7 @@ import Darwin
 
 final class TestExtensionContext: NSExtensionContext {
     let items: [Any]
-    var afterReply: (() -> Void)?
+    var afterReply: (([String: Any]) -> Void)?
     init(message: [String: Any], profile: String) {
         let item = NSExtensionItem()
         item.userInfo = [SFExtensionMessageKey: message]
@@ -20,7 +20,7 @@ final class TestExtensionContext: NSExtensionContext {
             print(json)
             fflush(stdout)
         }
-        if let afterReply { afterReply(); return }
+        if let afterReply { afterReply(result); return }
         // A real hung handler must terminate through its watchdog (exit124);
         // a healthy request exits cleanly after the native reply is observed.
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { exit(0) }
@@ -34,8 +34,17 @@ if CommandLine.arguments.contains("--native-messages") {
     let handler = SafariWebExtensionHandler()
     let contexts = messages.map { TestExtensionContext(message: $0, profile: profile) }
     for index in contexts.indices {
-        contexts[index].afterReply = {
-            if index + 1 < contexts.count { handler.beginRequest(with: contexts[index + 1]) }
+        contexts[index].afterReply = { reply in
+            if index + 1 < contexts.count {
+                if let item = contexts[index + 1].items.first as? NSExtensionItem,
+                   var message = item.userInfo?[SFExtensionMessageKey] as? [String: Any],
+                   var payload = message["payload"] as? [String: Any], payload["token"] as? String == "$previousToken" {
+                    payload["token"] = (reply["result"] as? [String: Any])?["token"] ?? "missing"
+                    message["payload"] = payload
+                    item.userInfo?[SFExtensionMessageKey] = message
+                }
+                handler.beginRequest(with: contexts[index + 1])
+            }
             else { DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { exit(0) } }
         }
     }
@@ -99,6 +108,41 @@ let suppressed = try cold.handle(tick)
 check((suppressed["actions"] as? [[String: Any]])?.isEmpty == true, "disabled rule emits no actions")
 let badLoad = try cold.handle(["kind": "load-source", "groupId": "one", "source": "not valid syntax(", "state": [:]])
 check(badLoad["ok"] as? Bool == false, "invalid source refused")
+// Registration memory must survive without relying on a later event.
+let initEngine = try SafariRuleEngine(resources: resources)
+let initJournal = try SafariRuleJournal(directory: directory, profile: "initialization")
+let counterSource = "(on,v)=>{v.state.run=(v.state.run||0)+1;}"
+func initLoad(_ source: String, _ state: [String: Any], kind: String = "load-source") throws -> [String: Any] {
+    try initEngine.handleJournaled(["kind": kind, "groupId": "init", "source": source, "state": state], journal: initJournal)
+}
+let firstInit = try initLoad(counterSource, [:])
+check((firstInit["states"] as? [String: [String: Any]])?["init"]?["run"] as? Int == 1, "initialization-only native load exports memory")
+let secondInit = try initLoad(counterSource, initJournal.groups["init"]?["state"] as? [String: Any] ?? [:])
+check((secondInit["states"] as? [String: [String: Any]])?["init"]?["run"] as? Int == 2, "native Run retains initialization-only memory")
+let restoredInit = try SafariRuleEngine(resources: resources)
+try restoredInit.restore(initJournal)
+check(initJournal.groups["init"]?["state"] as? [String: Int] == ["run": 3], "native cold restore commits initialization-only changes before events")
+let oldSource = "(on,v)=>{v.state.run=(v.state.run||0)+1;on('tick',()=>v.log(v.state.run));}"
+_ = try initLoad(oldSource, [:])
+let prepared = try initLoad("(on,v)=>{v.state.run=99;}", ["run": 1], kind: "prepare-source")
+check(initJournal.groups["init"]?["source"] as? String == oldSource, "prepared candidate leaves the recovery journal unchanged")
+let stagedCold = try SafariRuleJournal(directory: directory, profile: "initialization")
+check(stagedCold.groups["init"]?["source"] as? String == oldSource, "cold journal cannot replay an uncommitted candidate")
+_ = try initEngine.handleJournaled(["kind":"discard-source", "groupId":"init", "token":prepared["token"] ?? ""], journal: initJournal)
+let invalidInitial = try initLoad("(on,v)=>{v.state.text='中'.repeat(22000);}", [:])
+check(invalidInitial["ok"] as? Bool == false, "native registration applies UTF-8 state byte limit")
+let pendingFailure = try initLoad("(on,v)=>{v.state.run=99;}", ["run":1], kind:"prepare-source")
+let journalBackup = initJournal.url.appendingPathExtension("backup")
+try FileManager.default.moveItem(at: initJournal.url, to: journalBackup)
+try FileManager.default.createDirectory(at: initJournal.url, withIntermediateDirectories:false)
+let failedSave = try initEngine.handleJournaled(["kind":"commit-source", "groupId":"init", "token":pendingFailure["token"] ?? ""], journal:initJournal)
+check(failedSave["ok"] as? Bool == false && initJournal.groups["init"]?["source"] as? String == oldSource, "native journal write failure preserves saved source and state")
+let stillOld = try initEngine.handle(["kind":"dispatch-event", "descriptor":["type":"tick", "targetGroupId":"init"]])
+check((stillOld["logs"] as? [[String:Any]])?.first?["args"] as? [Int] == [1], "failed native commit preserves exact prior handler without initializer replay")
+try FileManager.default.removeItem(at:initJournal.url)
+try FileManager.default.moveItem(at:journalBackup,to:initJournal.url)
+let errorField = try initLoad("(on,v)=>{v.state.error='ordinary memory';}", [:])
+check((errorField["states"] as? [String:[String:Any]])?["init"]?["error"] as? String == "ordinary memory", "native user error field remains valid JSON state")
 let broker = SafariFileBroker(directory: directory, profile: "one", grantedRoot: directory)
 func file(_ action: String, _ path: String, _ text: String = "") -> [String: Any] {
     broker.perform(["action": action, "path": path, "directoryPath": action == "list" ? path : "", "text": text, "requestId": "one:9"])
