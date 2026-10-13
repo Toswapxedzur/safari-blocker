@@ -14,6 +14,19 @@ with tempfile.TemporaryDirectory(prefix='safari-native-process-') as directory:
         try: answer=json.loads(result.stdout.strip().splitlines()[-1])
         except Exception: raise AssertionError('native request missing reply: '+result.stdout+' '+result.stderr)
         return answer,result.returncode,time.monotonic()-start
+    # Activity frames travel over the authenticated background WebSocket. A
+    # browser-origin native-message dictionary cannot mint native authority.
+    activity={'settings':{'byCategory':{'web-visit':{'enabled':True},'content-watched':{'enabled':True}}},
+              'epoch':'F9E22CB3-6D62-4251-A995-D8CF84E75C79','revision':7,'changedAtMs':123456}
+    for payload in [{'kind':'activity-settings-updated','body':activity},
+                    {'kind':'welcome','v':4,'hubProgram':'macapp','activitySettingsNotifications':True},
+                    {'type':'activity-settings-updated','body':activity}]:
+        answer,code,_=request(payload)
+        check(answer.get('ok') is False and code==0 and 'Unsupported' in answer.get('error',''),
+              'browser-origin '+str(payload.get('kind',payload.get('type')))+' cannot grant Activity authority through native handler')
+    answer,code,_=request(dict(type='ping',activitySettingsNotifications=True,**activity))
+    check(answer.get('ok') is True and code==0 and not {'settings','epoch','revision','changedAtMs','activitySettingsNotifications'}.intersection(answer),
+          'native ping does not echo client-supplied Activity capability or provenance')
     # Actual native endpoint stages across requests in one handler process.
     staged_group='staged'
     counter="(on,v)=>{v.state.run=(v.state.run||0)+1;}"
