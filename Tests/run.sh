@@ -28,3 +28,5 @@ if [ -z "$NODE" ]; then NODE="$HOME/.local/node-v24.20.0-darwin-x64/bin/node"; f
 "$NODE" "$ROOT/../customBlocker/tests/runner-local-hub-environment.js"
 "$NODE" "$ROOT/../customBlocker/tests/runner-safari-packaging.js"
 "$NODE" "$ROOT/../customBlocker/tests/runner-safari-native-lifecycle.js"
+
+"$NODE" "$ROOT/Tests/bridge-origin.js"

@@ -1344,11 +1344,11 @@ if (typeof cbActivity !== "undefined") {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message !== "object") return false;
     if (message.kind === "vault-activity-watched") {
-      cbActivity.recordWatched(message.record);
-      return false;
+      cbActivity.recordWatched(message.record).then(sendResponse).catch(() => sendResponse({ ok: false, permanent: false }));
+      return true;
     }
     if (message.kind === "vault-activity-config") {
-      sendResponse({ "content-watched": !!cbActivity.enabled["content-watched"] });
+      sendResponse(cbActivity.contentSettings());
       return false;
     }
     return false;
@@ -1798,7 +1798,7 @@ const LOG_FEED_MAX_MESSAGE_BYTES = 4096;
 const logFeedBursts = new Map();
 
 function pushLogFeedEntry(entry) {
-  if (!entry || entry.source !== "v.log" || typeof entry.groupId !== "string" || !entry.groupId) return;
+  if (!entry || !["v.log", "page-error"].includes(entry.source) || typeof entry.groupId !== "string" || !entry.groupId) return;
   const now = Date.now();
   let burst = logFeedBursts.get(entry.groupId);
   if (!burst || now - burst.start > 1000) {
@@ -1826,8 +1826,8 @@ function pushLogFeedEntry(entry) {
   const record = {
     id: ++logFeedSeq,
     ts: now,
-    source: "v.log",
-    level: "log",
+    source: entry.source,
+    level: entry.source === "page-error" ? "error" : "log",
     groupId: entry.groupId || "",
     eventType: entry.eventType || "",
     message
@@ -2277,7 +2277,10 @@ async function applyRuleResultLocked(result, eventType, generations = null) {
   for (const [groupId, panels] of Object.entries(result.panels || {})) if (current.has(groupId)) cbSetRulePanels(groupId, panels);
   const pages = new Map(); // tabId | "*" -> { items, dom, queries, cover }
   const sheetTabs = new Set(); // tabs (or "*") whose sheets changed
-  const page = (tabId) => {
+  const pageGroups = new Map(); // Worker-only attribution; page payload stays unchanged.
+  const page = (tabId, groupId) => {
+    if (!pageGroups.has(tabId)) pageGroups.set(tabId, new Set());
+    pageGroups.get(tabId).add(groupId);
     if (!pages.has(tabId)) pages.set(tabId, { type: "rule-apply", items: [], dom: [], queries: [], cover: null });
     return pages.get(tabId);
   };
@@ -2285,8 +2288,8 @@ async function applyRuleResultLocked(result, eventType, generations = null) {
     const { groupId, kind, tabId } = action || {};
     if (!current.get(groupId)?.enabled) continue;
     try {
-      if (kind === "item") page(tabId).items.push({ groupId, ref: action.ref, verdict: action.verdict });
-      else if (kind === "cover") page(tabId).cover = { groupId, on: action.on, message: action.message };
+      if (kind === "item") page(tabId, groupId).items.push({ groupId, ref: action.ref, verdict: action.verdict });
+      else if (kind === "cover") page(tabId, groupId).cover = { groupId, on: action.on, message: action.message };
       else if (kind === "css") {
         const byId = cbRuleSheets.get(groupId) || new Map();
         if (action.css === null) byId.delete(action.id);
@@ -2295,8 +2298,8 @@ async function applyRuleResultLocked(result, eventType, generations = null) {
         else cbRuleSheets.delete(groupId);
         sheetTabs.add(tabId);
       }
-      else if (kind === "dom") page(tabId).dom.push({ selector: action.selector, op: action.op, arg: action.arg });
-      else if (kind === "query") page(tabId).queries.push({ groupId, requestId: action.requestId, selector: action.selector });
+      else if (kind === "dom") page(tabId, groupId).dom.push({ selector: action.selector, op: action.op, arg: action.arg });
+      else if (kind === "query") page(tabId, groupId).queries.push({ groupId, requestId: action.requestId, selector: action.selector });
       else if (kind === "close") await chrome.tabs.remove(tabId);
       else if (kind === "go") {
         if (action.target === "back") await chrome.tabs.goBack(tabId);
@@ -2307,8 +2310,21 @@ async function applyRuleResultLocked(result, eventType, generations = null) {
     } catch (_) {}
   }
   for (const [tabId, message] of pages) {
-    if (tabId === "*") await cbSendToWebPages(message);
-    else if (!(await trySendApply(tabId, message))) enqueueApply(tabId, message);
+    const report = (targetTabId, delivery) => {
+      if (delivery.status === "delivered" || delivery.status === "unavailable") return;
+      const detail = delivery.status === "receiver-error"
+        ? "A page action batch containing this rule failed; not replayed: " + delivery.error
+        : "Page action delivery is uncertain; not replayed" + (delivery.error ? ": " + delivery.error : "");
+      for (const groupId of pageGroups.get(tabId)) {
+        pushLogFeedEntry({ source: "page-error", level: "error", groupId, eventType, message: detail });
+      }
+    };
+    if (tabId === "*") await cbSendToWebPages(message, report);
+    else {
+      const delivery = await trySendApply(tabId, message);
+      if (delivery.status === "unavailable") enqueueApply(tabId, message);
+      else report(tabId, delivery);
+    }
   }
   if (sheetTabs.size > 0) {
     cbSaveRuleSheets();
@@ -2336,8 +2352,15 @@ async function cbRunRuleFile(action) {
 
 let lastReconcileSnapshot = new Map();
 
-async function reconcileCustomGroupHandlers(change) {
-  const newGroups = Array.isArray(change?.newValue) ? change.newValue : [];
+function reconcileCustomGroupHandlers() {
+  // Never replace a completed Run's snapshot with an older reconciliation.
+  return cbSerializeRuleMutation(cbReconcileCustomGroupHandlers);
+}
+
+async function cbReconcileCustomGroupHandlers() {
+  // Read after entering the queue; the caller's snapshot may already be stale.
+  const stored = await chrome.storage.local.get({ [BLOCKED_GROUPS_KEY]: [] });
+  const newGroups = Array.isArray(stored[BLOCKED_GROUPS_KEY]) ? stored[BLOCKED_GROUPS_KEY] : [];
   const previous = lastReconcileSnapshot;
   const next = new Map();
   for (const group of newGroups) {
@@ -2360,7 +2383,8 @@ async function reconcileCustomGroupHandlers(change) {
     const group = newGroups.find((g) => g.id === groupId);
     if (!before || before.activeEventSource !== snapshot.activeEventSource) {
       // A load the sandbox never answered isn't recorded: the next change retries it.
-      if (!(await loadCustomGroupSource(group))) next.delete(groupId);
+      // Already in the rule queue: its outer loader would wait on us.
+      if (!(await cbLoadCustomGroupSource(group))) next.delete(groupId);
     } else if (before.enabled !== snapshot.enabled && cbRuleTypes.has(groupId)) {
       await cbSuppressRule(groupId, !snapshot.enabled);
     }
@@ -2488,10 +2512,19 @@ function enqueueApply(tabId, message) {
 
 async function trySendApply(tabId, message) {
   try {
-    await chrome.tabs.sendMessage(tabId, message);
-    return true;
-  } catch {
-    return false;
+    const response = await chrome.tabs.sendMessage(tabId, message);
+    if (response?.ok === true) return { status: "delivered" };
+    if (response?.ok === false) {
+      return { status: "receiver-error", error: String(response.error || "Page action failed") };
+    }
+    // No ACK is not evidence that the page did nothing. Never replay it.
+    return { status: "unacknowledged" };
+  } catch (error) {
+    const detail = String(error?.message || error);
+    // A closed response channel can follow execution. Queue only an explicit
+    // missing receiver, retaining the existing bounded content-ready queue.
+    const unavailable = /^(?:Could not establish connection\. )?Receiving end does not exist\.?$/i.test(detail);
+    return { status: unavailable ? "unavailable" : "transport-error", error: detail };
   }
 }
 
@@ -2561,7 +2594,7 @@ function cbScheduleRecheck({ definitionChanged = false } = {}) {
 }
 
 // Sends one message to every open web page.
-async function cbSendToWebPages(message) {
+async function cbSendToWebPages(message, onDelivery = null) {
   if (!chrome.tabs || !chrome.tabs.query) return;
   const tabs = await chrome.tabs.query({});
   await Promise.all(
@@ -2569,7 +2602,8 @@ async function cbSendToWebPages(message) {
       if (!tab || typeof tab.id !== "number") return;
       const url = tab.url || tab.pendingUrl || "";
       if (url && !/^https?:/i.test(url)) return;
-      await trySendApply(tab.id, message);
+      const delivery = await trySendApply(tab.id, message);
+      if (onDelivery) onDelivery(tab.id, delivery);
     })
   );
 }
@@ -3395,6 +3429,8 @@ const cbConnection = {
   // must also accept our protocol hello with a welcome message.
   burstStartMs: 0,
   handshakeComplete: false,
+  activitySettingsNotifications: false,
+  activitySettingsConnectionGeneration: 0,
   startupReady: null,
 
   setStatus(patch) {
@@ -3707,7 +3743,14 @@ const cbConnection = {
     }
   },
 
+  invalidateActivitySettingsConnection() {
+    this.activitySettingsConnectionGeneration += 1;
+    this.activitySettingsNotifications = false;
+    if (typeof cbActivity !== "undefined") cbActivity.beginSettingsConnection(this.activitySettingsConnectionGeneration);
+  },
+
   closeSocket() {
+    this.invalidateActivitySettingsConnection();
     // Requests in flight fail now, not after their timeout.
     try { cbClassifierHub.rejectAll(); } catch (_) {}
     if (this.ws) {
@@ -3755,7 +3798,7 @@ const cbConnection = {
     }, CB_CONNECTION_BURST_WINDOW_MS);
     socket.onopen = () => {};
     socket.onmessage = (event) => {
-      this.handleMessage(event && event.data);
+      if (this.ws === socket) this.handleMessage(event && event.data);
     };
     socket.onerror = () => {
       // A failure before the socket ever opened means the shared broker isn't
@@ -3766,6 +3809,7 @@ const cbConnection = {
       }
     };
     socket.onclose = () => {
+      this.invalidateActivitySettingsConnection();
       this.clearTimers();
       this.ws = null;
       try { cbClassifierHub.rejectAll(); } catch (_) {}
@@ -3860,6 +3904,8 @@ const cbConnection = {
           this.connectTimer = null;
         }
         this.handshakeComplete = true;
+        this.activitySettingsNotifications = msg.activitySettingsNotifications === true
+          && ["macapp", "windowsapp"].includes(msg.hubProgram);
         this.usageTransferReceipts = msg.usageTransferReceipts === true;
         cbJoinsSent.clear();
         this.burstStartMs = 0;
@@ -3869,6 +3915,9 @@ const cbConnection = {
           hubProgram: msg.hubProgram,
           peers: Array.isArray(msg.peers) ? msg.peers : this.status.peers
         });
+        if (this.activitySettingsNotifications && typeof cbActivity !== "undefined") {
+          void cbActivity.refreshSettings();
+        }
         this.pingTimer = setInterval(() => {
           this.sendWS({ kind: "ping", t: Date.now() });
         }, CB_CONNECTION_PING_MS);
@@ -3924,6 +3973,16 @@ const cbConnection = {
         // The request map below ignores unmatched replies, so classifier
         // responses cannot cross-route ordinary group-sync traffic.
         if (self.CBClassifierHub) self.CBClassifierHub.receive(msg);
+        break;
+      case "activity-settings-updated":
+        // Only the authenticated desktop hub can originate this kind. It is
+        // deliberately outside the classifier-broadcast operation allowlist.
+        if (this.handshakeComplete && this.activitySettingsNotifications
+          && this.desktopRouteIsReady() && ["macapp", "windowsapp"].includes(this.status.hubProgram)
+          && typeof cbActivity !== "undefined") {
+          void cbActivity.applyNativeSettingsSnapshot(msg.body, this.activitySettingsConnectionGeneration)
+            .catch(error => console.error("[CustomBlocker] Activity snapshot application failed", error));
+        }
         break;
       case "classifier-broadcast":
         // Unsolicited classifier push (a completed classification). No pending
