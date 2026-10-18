@@ -185,5 +185,35 @@ guard mkfifo(pipe.path, 0o600) == 0 else { fatalError("Could not create the disp
 check(file("read", "pipe.txt")["error"] as? String == "unsupported-file-type", "FIFO read refuses blocking special files")
 check(file("write", "pipe.txt", "unsafe")["error"] as? String == "unsupported-file-type", "FIFO write refuses special files")
 check(file("exists", "pipe.txt")["exists"] as? Bool == false, "FIFO is not a regular file")
+// Managed time contracts use the actual independent Safari JSC runtime and
+// journal. They do not enable/install the extension or touch a browser profile.
+let timed = try SafariRuleEngine(resources:resources)
+let timeJournal = try SafariRuleJournal(directory:directory,profile:"managed-time")
+let timeSource = #"(on,v)=>{const t=v.timer('clock',{durationMs:100});const r=v.rolling('budget',{windowMs:120000,limitMs:1000});r.assign({websites:['example.org']});v.panel('clock',{controls:[{type:'timer',timerId:'clock'}]});on('start',()=>t.start());on('tick',()=>{v.state.clock=t.snapshot();v.state.budget=r.snapshot();});on('timerEnded',()=>{v.state.ends=(v.state.ends||0)+1;});}"#
+let timeLoaded = try timed.handleJournaled(["kind":"load-source","groupId":"time","source":timeSource,"state":[:]],journal:timeJournal)
+check(timeLoaded["ok"] as? Bool == true,"Safari managed timer/tracker registration")
+let clockPanel = (timeLoaded["panels"] as? [[String:Any]])?.first?["controls"] as? [[String:Any]]
+check(clockPanel?.first?["type"] as? String == "text","Safari managed timer uses existing panel text renderer")
+let timeNow = (Date().timeIntervalSince1970 * 1000).rounded(.down)
+func timeEvent(_ engine:SafariRuleEngine,_ type:String,_ at:Double,_ data:[String:Any] = [:]) throws -> [String:Any] {
+    try engine.handleJournaled(["kind":"dispatch-event","descriptor":["type":type,"targetGroupId":"time","now":at,"data":data]],journal:timeJournal)
+}
+_ = try timeEvent(timed,"start",timeNow)
+let timeEnded = try timeEvent(timed,"tick",timeNow+101)
+check((timeEnded["states"] as? [String:[String:Any]])?["time"]?["ends"] as? Int == 1,"Safari countdown delivers its managed completion")
+_ = try timeEvent(timed,"visible",timeNow+1101,["url":"https://example.org","elapsedMs":1000])
+let timeSpent = try timeEvent(timed,"tick",timeNow+1101)
+let savedTime = (timeSpent["states"] as! [String:[String:Any]])["time"]!
+check((savedTime["budget"] as? [String:Any])?["available"] as? Bool == false,"Safari observed website usage exhausts one named allowance")
+_ = try timed.handleJournaled(["kind":"time-context","groupId":"time","context":["linked":true,"ready":false,"clusterId":"shared-test"]],journal:timeJournal)
+let offline = try timeEvent(timed,"tick",timeNow+1200)
+check((((offline["states"] as? [String:[String:Any]])?["time"]?["budget"]) as? [String:Any])?["ready"] as? Bool == false,"Safari shared state is unavailable while disconnected")
+let timeCold = try SafariRuleEngine(resources:resources)
+try timeCold.restore(try SafariRuleJournal(directory:directory,profile:"managed-time"))
+let recoveredTime = try timeEvent(timeCold,"tick",timeNow+1300)
+let coldState = (recoveredTime["states"] as! [String:[String:Any]])["time"]!
+check((coldState["budget"] as? [String:Any])?["ready"] as? Bool == false && coldState["ends"] as? Int == 1,"Safari journal recovery preserves shared fail-closed state and completion receipt")
+let deniedControl = try timeEvent(timeCold,"start",timeNow+1300)
+check((deniedControl["diagnostics"] as? [[String:Any]])?.contains(where:{ String(describing:$0["args"] ?? "").contains("fresh hub") }) == true,"Safari recovered offline timer refuses controls")
 print("SAFARI_NATIVE_RESULT: \(failures == 0 ? "OK" : "FAIL") (\(failures) failures)")
 exit(failures == 0 ? 0 : 1)
