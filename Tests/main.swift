@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import SafariServices
 import Darwin
+import JavaScriptCore
 
 final class TestExtensionContext: NSExtensionContext {
     let items: [Any]
@@ -215,5 +216,119 @@ let coldState = (recoveredTime["states"] as! [String:[String:Any]])["time"]!
 check((coldState["budget"] as? [String:Any])?["ready"] as? Bool == false && coldState["ends"] as? Int == 1,"Safari journal recovery preserves shared fail-closed state and completion receipt")
 let deniedControl = try timeEvent(timeCold,"start",timeNow+1300)
 check((deniedControl["diagnostics"] as? [[String:Any]])?.contains(where:{ String(describing:$0["args"] ?? "").contains("fresh hub") }) == true,"Safari recovered offline timer refuses controls")
+// Exercise the canonical hub policy in actual JavaScriptCore. These tests use
+// disposable journals and independent native runtimes, never browser profiles.
+let timePolicy = JSContext()!
+timePolicy.evaluateScript(try String(contentsOf: resources.appendingPathComponent("rule-core.js"), encoding: .utf8))
+func policyTime(_ method: String, _ arguments: [Any]) throws -> [String:Any] {
+    let json = String(data: try JSONSerialization.data(withJSONObject: arguments), encoding: .utf8)!
+    let reply = timePolicy.evaluateScript("JSON.stringify(RuleCore.\(method)(...\(json)))")?.toString()
+    guard timePolicy.exception == nil, let reply,
+          let value = try JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String:Any] else {
+        timePolicy.exception = nil
+        throw SafariRuntimeError.invalidReply
+    }
+    return value
+}
+func managedState(_ result: [String:Any], _ group: String) -> [String:Any] {
+    (result["states"] as? [String:[String:Any]])?[group] ?? [:]
+}
+func managedEvent(_ engine: SafariRuleEngine, _ journal: SafariRuleJournal, _ group: String,
+                  _ type: String, _ at: Double, _ data: [String:Any] = [:]) throws -> [String:Any] {
+    try engine.handleJournaled(["kind":"dispatch-event", "descriptor":["type":type, "targetGroupId":group, "now":at, "data":data]], journal:journal)
+}
+let exactEngine = try SafariRuleEngine(resources:resources)
+let exactJournal = try SafariRuleJournal(directory:directory,profile:"managed-exact-expiry")
+let exactSource = #"(on,v)=>{const r=v.rolling('budget',{windowMs:10000,limitMs:3000});r.assign({websites:['example.org','example.net']});on('tick',()=>{v.state.budget=r.snapshot();});}"#
+_ = try exactEngine.handleJournaled(["kind":"load-source","groupId":"exact","source":exactSource,"state":[:]],journal:exactJournal)
+// Stay ahead of real registration time without sleeps in boundary assertions.
+let exactStart = timeNow + 10000
+_ = try managedEvent(exactEngine,exactJournal,"exact","visible",exactStart+5000,["url":"https://example.org","elapsedMs":5000])
+_ = try managedEvent(exactEngine,exactJournal,"exact","visible",exactStart+6000,["url":"https://example.net","elapsedMs":5000])
+func exactBudget(_ at:Double) throws -> [String:Any] {
+    let result = try managedEvent(exactEngine,exactJournal,"exact","tick",at)
+    // An unchanged snapshot is intentionally omitted from the event reply.
+    let saved = exactJournal.groups["exact"]?["state"] as? [String:Any] ?? [:]
+    return managedState(result,"exact")["budget"] as? [String:Any] ?? saved["budget"] as? [String:Any] ?? [:]
+}
+let overused = try exactBudget(exactStart+6000)
+check(overused["usedMs"] as? Int == 6000 && overused["available"] as? Bool == false,"Safari counts all over-limit usage and deduplicates overlapping assigned websites")
+let exactBoundary = try exactBudget(exactStart+10000)
+let exactFirstCredit = try exactBudget(exactStart+10001)
+if exactBoundary["usedMs"] as? Int != 6000 || exactFirstCredit["usedMs"] as? Int != 5999 {
+    print("Safari exact expiry boundary diagnostic: \(exactBoundary); next millisecond: \(exactFirstCredit)")
+}
+check(exactBoundary["usedMs"] as? Int == 6000 && exactFirstCredit["usedMs"] as? Int == 5999 && exactFirstCredit["available"] as? Bool == false,"Safari expires exact milliseconds without restoring an overused allowance prematurely")
+let exactLimit = try exactBudget(exactStart+13000)
+let exactAvailable = try exactBudget(exactStart+13001)
+check(exactLimit["usedMs"] as? Int == 3000 && exactLimit["available"] as? Bool == false && exactAvailable["usedMs"] as? Int == 2999 && exactAvailable["available"] as? Bool == true,"Safari availability returns only after full retained usage falls below the limit")
+let expiredBudget = try exactBudget(exactStart+16000)
+check(expiredBudget["usedMs"] as? Int == 0,"Safari exact rolling history fully expires at the final interval boundary")
+
+let detachedSeed = coldState["$vaultTime"] as! [String:Any]
+let finalMerge = try policyTime("mergeTime",[NSNull(),[["member":"safari/time","state":detachedSeed]],"safari/time",timeNow+1300])
+var finalShared = finalMerge["state"] as! [String:Any]
+var finalObjects = finalShared["objects"] as! [String:[String:Any]]
+finalObjects["clock"]?["generation"] = 9
+finalObjects["clock"]?["elapsedMs"] = 42
+finalObjects["clock"]?["startedAtMs"] = NSNull()
+finalObjects["budget"]?["websites"] = ["example.org","example.net"]
+finalObjects["budget"]?["segments"] = [[timeNow+2000,timeNow+6000]]
+finalObjects["budget"]?["bucketsMs"] = [:]
+finalShared["objects"] = finalObjects
+finalShared["confirmed"] = ["safari/time":true]
+var staleSeed = detachedSeed
+staleSeed["pending"] = [["id":"clock","op":"reset","serial":99,"atMs":timeNow+6000,"scope":"shared-test"]]
+let transferred = try policyTime("detachTime",[staleSeed,finalShared,"safari/time","safari/time","shared-test","safari-retained-token",timeNow+6000])
+check(transferred["ok"] as? Bool == true,"Safari JSC validates the retained final shared snapshot")
+let detachedContext = try timeCold.handleJournaled(["kind":"time-context","groupId":"time","context":["linked":false,"detached":true,"state":transferred["state"] ?? [:]]],journal:timeJournal)
+let detachedResult = try timeEvent(timeCold,"tick",timeNow+6000)
+let detachedState = managedState(detachedResult,"time")
+let detachedNamespace = detachedState["$vaultTime"] as? [String:Any] ?? [:]
+let detachedObjects = detachedNamespace["objects"] as? [String:[String:Any]] ?? [:]
+check(detachedContext["ok"] as? Bool == true && detachedObjects["clock"]?["generation"] as? Int == 9 && (detachedNamespace["pending"] as? [Any])?.isEmpty == true,"Safari final handover replaces stale timer state and discards old linked commands")
+check((detachedState["budget"] as? [String:Any])?["usedMs"] as? Int == 4000 && detachedObjects["budget"]?["websites"] as? [String] == ["example.org"],"Safari final handover keeps shared overuse and restores this member's target assignments")
+let detachedJournal = try SafariRuleJournal(directory:directory,profile:"managed-time")
+let detachedCold = try SafariRuleEngine(resources:resources)
+try detachedCold.restore(detachedJournal)
+let detachedColdResult = try managedEvent(detachedCold,detachedJournal,"time","tick",timeNow+6100)
+let detachedColdState = managedState(detachedColdResult,"time")
+let detachedColdNamespace = detachedColdState["$vaultTime"] as? [String:Any] ?? [:]
+check((detachedColdNamespace["detachedReceipt"] as? [String:Any])?["token"] as? String == "safari-retained-token" && (detachedColdState["budget"] as? [String:Any])?["usedMs"] as? Int == 4000 && (detachedColdState["clock"] as? [String:Any])?["ready"] as? Bool == true,"Safari cold journal restore preserves the final snapshot and pending handover receipt")
+_ = try managedEvent(detachedCold,detachedJournal,"time","start",timeNow+6200)
+let afterLocalControl = managedState(try managedEvent(detachedCold,detachedJournal,"time","tick",timeNow+6230),"time")
+let acknowledged = try policyTime("detachTime",[afterLocalControl["$vaultTime"] ?? [:],finalShared,"safari/time","safari/time","shared-test","safari-retained-token",timeNow+6230,true])
+let ackNamespace = acknowledged["state"] as? [String:Any] ?? [:]
+let ackObjects = ackNamespace["objects"] as? [String:[String:Any]] ?? [:]
+check(acknowledged["ok"] as? Bool == true && ackNamespace["detachedReceipt"] == nil && ackObjects["clock"]?["startedAtMs"] as? Double == timeNow+6200,"Safari final snapshot acknowledgement preserves timer controls performed after handover")
+
+// The same hub timer completes once independently for each linked member.
+let memberSource = #"(on,v)=>{const t=v.timer('clock',{durationMs:100});on('start',()=>t.start());on('timerEnded',()=>{v.state.ends=(v.state.ends||0)+1;});}"#
+let memberA = try SafariRuleEngine(resources:resources), memberB = try SafariRuleEngine(resources:resources)
+let memberAJournal = try SafariRuleJournal(directory:directory,profile:"managed-member-a")
+let memberBJournal = try SafariRuleJournal(directory:directory,profile:"managed-member-b")
+let memberALoad = try memberA.handleJournaled(["kind":"load-source","groupId":"a","source":memberSource,"state":[:]],journal:memberAJournal)
+let memberBLoad = try memberB.handleJournaled(["kind":"load-source","groupId":"b","source":memberSource,"state":[:]],journal:memberBJournal)
+let memberStart = timeNow+20000
+let memberStarted = try managedEvent(memberA,memberAJournal,"a","start",memberStart)
+let memberSeedA = managedState(memberStarted,"a")["$vaultTime"] ?? managedState(memberALoad,"a")["$vaultTime"] ?? [:]
+let memberSeedB = managedState(memberBLoad,"b")["$vaultTime"] ?? [:]
+let memberMerge = try policyTime("mergeTime",[NSNull(),[["member":"safari/a","state":memberSeedA],["member":"chrome/b","state":memberSeedB]],"safari/a",memberStart])
+let memberShared = memberMerge["state"] as? [String:Any] ?? [:]
+for (runtime,store,id) in [(memberA,memberAJournal,"a"),(memberB,memberBJournal,"b")] {
+    let context: [String:Any] = ["linked":true,"ready":true,"clusterId":"completion-members","state":memberShared,"acknowledgedSerial":0]
+    _ = try runtime.handleJournaled(["kind":"time-context","groupId":id,"context":context],journal:store)
+    let ended = try managedEvent(runtime,store,id,"tick",memberStart+101)
+    check(managedState(ended,id)["ends"] as? Int == 1,"Safari linked member \(id) receives its own completion once")
+    _ = try runtime.handleJournaled(["kind":"time-context","groupId":id,"context":context],journal:store)
+    let repeated = try managedEvent(runtime,store,id,"tick",memberStart+102)
+    check(managedState(repeated,id)["ends"] as? Int == 1,"Safari linked member \(id) does not replay completion after the same shared snapshot")
+}
+let memberCold = try SafariRuleEngine(resources:resources)
+let memberColdJournal = try SafariRuleJournal(directory:directory,profile:"managed-member-a")
+try memberCold.restore(memberColdJournal)
+_ = try memberCold.handleJournaled(["kind":"time-context","groupId":"a","context":["linked":true,"ready":true,"clusterId":"completion-members","state":memberShared,"acknowledgedSerial":0]],journal:memberColdJournal)
+let memberReconnected = try managedEvent(memberCold,memberColdJournal,"a","tick",memberStart+103)
+check(managedState(memberReconnected,"a")["ends"] as? Int == 1,"Safari member completion receipt survives journal restart and reconnect")
 print("SAFARI_NATIVE_RESULT: \(failures == 0 ? "OK" : "FAIL") (\(failures) failures)")
 exit(failures == 0 ? 0 : 1)
