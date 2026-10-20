@@ -7,13 +7,20 @@ const begin = source.indexOf('const cbConnection = {'), end = source.indexOf('\n
 assert(begin >= 0 && end > begin);
 const snapshots = [], sockets = [];let gets = 0;
 class Socket { static OPEN = 1;constructor() { this.readyState = 1;sockets.push(this); }close() {} }
-const context = vm.createContext({ console, navigator: { userAgent: 'Safari' }, WebSocket: Socket,
+const context = vm.createContext({ console, navigator: { userAgent: 'Version/18.0 Safari/605.1.15' }, WebSocket: Socket,
   CB_FIXED_ADDRESS: 'ws://fixture.invalid', CB_CONNECTION_PROTOCOL_VERSION: 4, CB_CONNECTION_BURST_WINDOW_MS: 5000,
   CB_CONNECTION_PING_MS: 20000, cbJoinsSent: new Set(), setTimeout: () => 1, setInterval: () => 1, clearTimeout() {}, clearInterval() {},
   cbClassifierHub: { rejectAll() {} }, cbActivity: { beginSettingsConnection() {}, refreshSettings() { gets++; },
     async applyNativeSettingsSnapshot(body, generation) { snapshots.push({ body: JSON.parse(JSON.stringify(body)), generation }); } } });
 context.self = context;
 vm.runInContext(fs.readFileSync(path.join(root, 'bridge-protocol.js'), 'utf8'), context);
+// The actual welcome handler calls the worker's program detector. Keep this
+// fixture on the same detector rather than supplying an invented browser claim.
+const detectorBegin = source.indexOf('function cbDetectProgramId() {');
+const detectorEnd = source.indexOf('\n}', detectorBegin) + 2;
+assert(detectorBegin >= 0 && detectorEnd > detectorBegin);
+vm.runInContext(source.slice(detectorBegin, detectorEnd), context);
+assert.equal(vm.runInContext('cbDetectProgramId()', context), 'safari');
 vm.runInContext(source.slice(begin, end + 3) + ';globalThis.connection=cbConnection;', context);
 const receiver = context.connection;receiver.setStatus = patch => { receiver.status = { ...receiver.status, ...patch }; };
 receiver.connect();const first = sockets.at(-1), obsoleteReceive = first.onmessage;
