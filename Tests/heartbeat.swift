@@ -9,23 +9,14 @@ struct SafariHeartbeatTests {
             else { failures += 1; print("FAIL \(label)") }
         }
         let gate = SafariHeartbeatGate()
-        check(gate.beginDispatch(safariRunning: false) == nil, "closed Safari never gets a heartbeat")
         let query = gate.beginStateQuery(now: 0)!
-        let first = gate.beginDispatch(safariRunning: true)!
-        check(gate.isActive(safariRunning: true), "unknown state preserves active runtime while query is pending")
-        check(gate.beginDispatch(safariRunning: true) == nil, "native dispatches never overlap")
+        check(gate.beginStateQuery(now: 1, force: true) == nil, "state queries do not overlap while fresh")
         gate.completeStateQuery(query, enabled: false)
-        check(!gate.isActive(safariRunning: true) && gate.beginDispatch(safariRunning: true) == nil, "known-disabled state stops heartbeat and activity")
+        check(gate.extensionEnabled == false, "disabled state is retained")
         let reenabledQuery = gate.beginStateQuery(now: 1, force: true)!
-        check(gate.beginStateQuery(now: 2, force: true) == nil, "state queries do not overlap while fresh")
         gate.completeStateQuery(reenabledQuery, enabled: true)
-        let second = gate.beginDispatch(safariRunning: true)!
-        gate.completeDispatch(first)
-        check(gate.beginDispatch(safariRunning: true) == nil, "stale disabled-session reply cannot clear a reenabled dispatch")
-        gate.completeDispatch(second)
-        check(gate.beginDispatch(safariRunning: true) != nil, "reenabling resumes native heartbeat")
-        _ = gate.beginDispatch(safariRunning: false)
-        check(gate.beginDispatch(safariRunning: true) != nil, "browser restart clears a stalled previous-session dispatch")
+        check(gate.extensionEnabled == true, "explicit refresh observes reenabled extension")
+        check(gate.beginStateQuery(now: 5) == nil, "background state refresh is coalesced")
         let stalledQuery = gate.beginStateQuery(now: 20)!
         let recoveredQuery = gate.beginStateQuery(now: 26, force: true)!
         gate.completeStateQuery(stalledQuery, enabled: false)

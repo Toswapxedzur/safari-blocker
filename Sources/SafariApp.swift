@@ -5,7 +5,6 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var status: NSTextField!
     private var heartbeat: Timer?
-    private var ruleActivity: NSObjectProtocol?
     private let heartbeatGate = SafariHeartbeatGate()
     private var backgroundLaunch: Bool { CommandLine.arguments.contains("--background") }
     private var extensionID: String {
@@ -89,24 +88,8 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
     private func pulse() {
         let safariRunning = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Safari").isEmpty
         if safariRunning { queryState() }
-        let active = heartbeatGate.isActive(safariRunning: safariRunning)
-        if active, ruleActivity == nil {
-            // User-enabled custom timers must continue with every browser
-            // window hidden. Allow ordinary system sleep while avoiding App
-            // Nap's deferred timers during the user's active browser session.
-            ruleActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
-                                                                reason: "Safari Vault custom rule timers")
-        } else if !active, let activity = ruleActivity {
-            ProcessInfo.processInfo.endActivity(activity)
-            ruleActivity = nil
-        }
-        guard let dispatch = heartbeatGate.beginDispatch(safariRunning: safariRunning) else { return }
-        // Apple's dispatch API can launch Safari. Checking its process first
-        // ensures quitting the browser does not cause it to be reopened.
-        SFSafariApplication.dispatchMessage(withName: "safari-lifecycle-tick", toExtensionWithIdentifier: extensionID,
-                                           userInfo: ["type": "safari-lifecycle-tick"]) { [weak self] _ in
-            DispatchQueue.main.async { self?.heartbeatGate.completeDispatch(dispatch) }
-        }
+        // Periodic work may inspect state, but must never dispatch to Safari:
+        // dispatchMessage can launch it after an ordinary Quit races this pulse.
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         NSApp.setActivationPolicy(.accessory)
@@ -120,9 +103,6 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
             else { NSApp.setActivationPolicy(.regular); window.makeKeyAndOrderFront(nil) }
         }
         return true
-    }
-    func applicationWillTerminate(_ notification: Notification) {
-        if let activity = ruleActivity { ProcessInfo.processInfo.endActivity(activity) }
     }
 }
 @main
@@ -151,7 +131,7 @@ struct SafariVaultMain {
         }
         let application = NSApplication.shared
         // Programmatic AppKit applications need an explicit menu to route ⌘Q.
-        // Closing onboarding still keeps the existing background heartbeat.
+        // Closing onboarding keeps the independent companion running.
         let menu = NSMenu()
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu(title: "Safari Vault")
