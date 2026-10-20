@@ -14,6 +14,19 @@ with tempfile.TemporaryDirectory(prefix='safari-native-process-') as directory:
         try: answer=json.loads(result.stdout.strip().splitlines()[-1])
         except Exception: raise AssertionError('native request missing reply: '+result.stdout+' '+result.stderr)
         return answer,result.returncode,time.monotonic()-start
+    # A reply to an existing native request never uses a browser-launch API.
+    # Each request is bounded and needs no companion dispatch or rule journal.
+    before=set(pathlib.Path(directory).rglob('*'))
+    for profile in ['heartbeat-one','heartbeat-two']:
+        answer,code,duration=request({'type':'safari-lifecycle-wait','ignored':'browser-launch'},profile=profile)
+        check(answer=={'ok':True,'type':'safari-lifecycle-tick'} and code==0,
+              'actual browser-originated heartbeat request receives only its tick reply')
+        # Allow broad scheduling/startup slack around the 1s native delay and
+        # the harness's 0.4s reply flush, while still detecting a stalled wait.
+        check(0.9 <= duration < 4,
+              'native heartbeat waits one bounded interval before replying')
+    check(set(pathlib.Path(directory).rglob('*'))==before,
+          'native heartbeat does not create rule journals or write local state')
     # Activity frames travel over the authenticated background WebSocket. A
     # browser-origin native-message dictionary cannot mint native authority.
     activity={'settings':{'byCategory':{'web-visit':{'enabled':True},'content-watched':{'enabled':True}}},

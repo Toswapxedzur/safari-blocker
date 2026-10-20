@@ -36,6 +36,18 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         let profile = SafariProfileContext.identifier(userInfo: item.userInfo)
         let type = message["type"] as? String ?? message["kind"] as? String ?? ""
         if type == "local-hub-challenge" { Self.respond(context, SafariConfiguration.proof(message: message)); return }
+        if type == "safari-lifecycle-wait" {
+            // Reply only to a request made by the running browser. Completing
+            // this context cannot launch Safari after it quits, unlike the
+            // containing app's SFSafariApplication.dispatchMessage API.
+            let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                                reason: "Safari Vault browser heartbeat")
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 1) {
+                ProcessInfo.processInfo.endActivity(activity)
+                Self.respond(context, ["ok": true, "type": "safari-lifecycle-tick"])
+            }
+            return
+        }
         if type == "safari-lifecycle-activate" {
             Self.activateContainingApp { Self.respond(context, $0) }
             return
@@ -55,9 +67,9 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         }
     }
     private static func activateContainingApp(completion: @escaping ([String: Any]) -> Void) {
-        // Native messaging cannot move execution into a Safari service worker.
-        // Launch only our own signed containing app in the background through
-        // Launch Services; never launch Safari or alter its security settings.
+        // Preserve the browser's one-time bootstrap of its own signed companion.
+        // Heartbeats reply through their existing request instead; this launch
+        // opens only our containing app in the background, never Safari.
         guard Bundle.main.bundleURL.pathExtension == "appex" else {
             completion(["ok": false, "error": "The containing app is unavailable."])
             return
