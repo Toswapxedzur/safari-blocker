@@ -350,5 +350,19 @@ let aiCold = try SafariRuleEngine(resources:resources)
 try aiCold.restore(aiJournal)
 let aiColdReply = try aiCold.handleJournaled(aiReply,journal:aiJournal)
 check((aiColdReply["actions"] as? [[String:Any]])?.isEmpty == true,"Safari cold restart does not replay old AI result")
+let attached = try SafariRuleEngine(resources:resources)
+let attachmentJournal = try SafariRuleJournal(directory:directory,profile:"attachments")
+let attachmentSource = #"(on,v)=>{on('items',({data})=>{if(!data.items[0].attachments.note)v.attach(data.tabId,data.items[0],'note',{type:'pill',text:'Read',tone:'blue'});});on('attachment',({data})=>v.log(data.eventName,data.attachmentId,data.item.contentId));}"#
+_ = try attached.handleJournaled(["kind":"load-source","groupId":"attachment","source":attachmentSource,"state":[:]],journal:attachmentJournal)
+let contentHandle: [String:Any] = ["ref":"i1","contentId":"youtube:video:fixture","instanceId":"page:1","attachments":[:]]
+let attachmentAction = try attached.handleJournaled(["kind":"dispatch-event","descriptor":["type":"items","data":["tabId":7,"items":[contentHandle]]]],journal:attachmentJournal)
+let intent = (attachmentAction["actions"] as? [[String:Any]])?.first ?? [:]
+check(intent["kind"] as? String == "attach" && intent["attachmentId"] as? String == "note","Safari JSC emits provider-neutral content attachment intent")
+check((intent["target"] as? [String:Any])?["instanceId"] as? String == "page:1","Safari attachment intent retains exact occurrence identity")
+let clicked = try attached.handleJournaled(["kind":"dispatch-event","descriptor":["type":"attachment","data":["eventName":"click","tabId":7,"attachmentId":"note","item":contentHandle]]],journal:attachmentJournal)
+check((clicked["logs"] as? [[String:Any]])?.first != nil,"Safari current rule receives content attachment click event")
+var cachedHandle = contentHandle;cachedHandle["attachments"] = ["note":["type":"pill","text":"Saved"]]
+let cachedAttachment = try attached.handleJournaled(["kind":"dispatch-event","descriptor":["type":"items","data":["tabId":7,"items":[cachedHandle]]]],journal:attachmentJournal)
+check((cachedAttachment["actions"] as? [[String:Any]])?.isEmpty == true,"Safari rule can skip work for a saved content attachment")
 print("SAFARI_NATIVE_RESULT: \(failures == 0 ? "OK" : "FAIL") (\(failures) failures)")
 exit(failures == 0 ? 0 : 1)

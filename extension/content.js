@@ -1878,6 +1878,7 @@ function scheduleSessionResolveRetries() {
 function cbOnNavigated() {
   if (exitAttempted || extensionContextInvalid) return;
   lastKnownUrl = location.href;
+  cbContentPage?.clear();cbRuleSent=new WeakMap();cbRulePageSent="";
   cbSessionFilterKey = "";
   // A rule's cover belonged to the old address; the page item is new.
   if (cbCover.ruleCover) cbSetRuleCover(null);
@@ -3218,6 +3219,7 @@ async function __cb_applyPanelSnapshots(panelSnapshots, panelGroups) {
 // style sheets the worker holds for this page; "rule-lift": a disabled rule).
 // ────────────────────────────────────────────────────────────────────────
 
+const cbContentPage = globalThis.VaultContentItems?.createPage({onClick:message=>safeSendMessage({type:'rule-attachment-click',...message})});
 let cbRuleItemsEpoch = 0; // the worker's; 0 = no rule wants items
 let cbRuleRefs = new Map(); // ref -> card
 let cbRuleCardRefs = new WeakMap(); // card -> ref
@@ -3237,7 +3239,7 @@ function cbRuleCardTitle(card) {
   return String(card.querySelector("[aria-label]")?.getAttribute("aria-label") || "").trim().slice(0, 500);
 }
 
-function cbRuleItem(ref, url, title, data, isPage) {
+function cbRuleItem(ref, url, title, data, isPage, handle = null) {
   return {
     ref,
     url,
@@ -3246,6 +3248,7 @@ function cbRuleItem(ref, url, title, data, isPage) {
     videoForm: data.videoForm || "unknown",
     tags: [...data.tags].map((tag) => ({ name: tag.name, confidence: tag.confidence })),
     tagsSettled: data.tags.settled === true,
+    ...(handle || {}),
     isPage
   };
 }
@@ -3265,15 +3268,14 @@ function cbRuleCardRef(card) {
 async function cbScanRuleItems() {
   cbRuleScanTimer = null;
   if (!cbRuleItemsEpoch || exitAttempted || extensionContextInvalid) return;
-  const platform = getCurrentFeedSite();
-  if (!platform) return;
+  const platform = getCurrentFeedSite() || 'web';
   for (const [ref, card] of cbRuleRefs) if (!card.isConnected) cbRuleRefs.delete(ref);
   let items = [], processed = 0;
   const epoch = cbRuleItemsEpoch, roots = cbRuleFullScan ? [document] : [...cbRuleDirtyRoots];
   cbRuleDirtyRoots.clear(); cbRuleFullScan = false;
   for (const root of roots) for (const card of getFeedCardElements(platform, root)) {
     if (++processed % 32 === 0) {
-      if (items.length) safeSendMessage({ type: "rule-items", platform, items });
+      if (items.length) safeSendMessage({ type: "rule-items", platform, items, pageToken:cbContentPage?.token,itemsEpoch:cbRuleItemsEpoch });
       items = []; await new Promise(resolve => setTimeout(resolve, 0));
       if (epoch !== cbRuleItemsEpoch || exitAttempted || extensionContextInvalid) return;
     }
@@ -3281,23 +3283,26 @@ async function cbScanRuleItems() {
     if (!data) continue;
     let url = "";
     try { url = new URL(getFeedCardHref(card, platform) || "", location.origin).href; } catch {}
-    const item = cbRuleItem(cbRuleCardRef(card), url, cbRuleCardTitle(card), data, false);
+    const ref=cbRuleCardRef(card);
+    const handle=cbContentPage?.observe(card,{ref,platform,url,anchor:card.querySelector('#video-title,h3,h2,[data-testid="tweetText"],[slot="title"]'),getURL:()=>new URL(getFeedCardHref(card,platform)||'',location.origin).href});
+    const item = cbRuleItem(ref, url, cbRuleCardTitle(card), data, false, handle);
     const sent = JSON.stringify(item);
     if (cbRuleSent.get(card) === sent) continue;
     cbRuleSent.set(card, sent);
     items.push(item);
   }
+  const pageHandle=cbContentPage?.observe(document.documentElement,{ref:'page',platform,url:location.href,anchor:document.querySelector('h1')||document.body?.firstElementChild,isPage:true,getURL:()=>location.href});
   const page = cbRuleItem("page", location.href, document.title, {
     creators: collectPlatformAuthors(location.pathname, platform === "youtube")[platform] || [],
     videoForm: detectVideoSiteContext(normalizeHostname(location.hostname), location.pathname).form,
     tags: cbTagPageContext ? getFeedCardTags(cbTagPageContext.root) : Object.assign([], { settled: false })
-  }, true);
+  }, true, pageHandle);
   const pageSent = JSON.stringify(page);
   if (pageSent !== cbRulePageSent) {
     cbRulePageSent = pageSent;
     items.push(page);
   }
-  if (items.length > 0) safeSendMessage({ type: "rule-items", platform, items });
+  if (items.length > 0) safeSendMessage({ type: "rule-items", platform, items, pageToken:cbContentPage?.token,itemsEpoch:cbRuleItemsEpoch });
 }
 
 let cbRuleFullScan = false, cbRuleScanRunning = false;
@@ -3316,11 +3321,12 @@ function cbSetRuleItemsEpoch(epoch) {
   const next = Number(epoch) || 0;
   if (next === cbRuleItemsEpoch) return;
   cbRuleItemsEpoch = next;
+  cbContentPage?.setEpoch(next);
   cbRuleSent = new WeakMap();
   cbRulePageSent = "";
   if (next && !cbRuleObserver && document.documentElement) {
-    cbRuleObserver = new MutationObserver(records => { const roots = changedFeedRoots(records); if (roots.length) cbScheduleRuleItems(roots); });
-    cbRuleObserver.observe(document.documentElement, { childList: true, subtree: true });
+    cbRuleObserver = new MutationObserver(records => { cbContentPage?.repair(); const roots = changedFeedRoots(records); if (roots.length) cbScheduleRuleItems(roots); });
+    cbRuleObserver.observe(document.documentElement, { childList: true, subtree: true, attributes:true, attributeFilter:["href","data-id","data-video-id"] });
   } else if (!next) {
     cbStopRuleItems();
   }
@@ -3388,6 +3394,7 @@ function cbSetRuleSheets(sheets) {
 // A disabled or removed group: what its rule did on this page is lifted
 // (its cover and its card verdicts; its sheets and panels come separately).
 function cbLiftRule(groupId) {
+  cbContentPage?.liftGroup(groupId);
   if (cbCover.ruleCover && cbCover.ruleCover.groupId === groupId) cbSetRuleCover(null);
   for (const card of [...cbTrackedCards]) {
     if (!card.isConnected) { cbTrackedCards.delete(card); continue; }
@@ -3587,6 +3594,12 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
       if (message.paused) cbPauseAllMedia();
       sendResponse({ ok: true });
       return true;
+    }
+    if(message.type==='rule-attachment-check') {
+      sendResponse({ok:message.pageToken===cbContentPage?.token&&cbContentPage.current(message.target)});return false;
+    }
+    if(message.type==='rule-attachments') {
+      cbContentPage?.snapshot(message);sendResponse({ok:true});return false;
     }
     if (message.type === "rule-sheets") {
       cbSetRuleSheets(message.sheets);

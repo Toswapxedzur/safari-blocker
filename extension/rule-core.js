@@ -682,6 +682,19 @@
         act("ai", {payload, requestId: id, generation: generation + ":" + aiEpoch});
         return id;
       },
+      // Browser content handle, not a selector or a mutable page/card ref.
+      attach(tabId, item, attachmentId, spec) {
+        check();
+        if (eventNow === null) throw new Error("v.attach must be called inside an event handler.");
+        if (!Number.isInteger(tabId) || !item || typeof item !== "object" ||
+            typeof item.ref !== "string" || item.ref.length > 128 ||
+            typeof item.contentId !== "string" || item.contentId.length > 2048 ||
+            typeof item.instanceId !== "string" || item.instanceId.length > 128 ||
+            typeof attachmentId !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(attachmentId)) throw new Error("Invalid content attachment target.");
+        const value = cloneJSON(spec);
+        if (value !== null && (!isPlainObject(value) || utf8Bytes(JSON.stringify(value)) > 6000)) throw new Error("Invalid content attachment.");
+        act("attach", {tabId, target:{ref:item.ref,contentId:item.contentId,instanceId:item.instanceId},attachmentId,spec:value});
+      },
       file(op, path, payload) {
         const id = requestId();
         act("file", { op: String(op || ""), path: String(path || ""), payload: payload === undefined ? null : cloneJSON(payload), requestId: id });
@@ -1137,7 +1150,8 @@
       "\"tick\" every second: data = { tabs: [{ tabId, url, active }] }.",
       "\"tab\" when a tab opens, goes to an address or closes: data = { kind: open | navigate | close, tabId, url, previousUrl }.",
       "\"visible\" while a page is visible: data = { tabId, url, elapsedMs } (the visible time since the last one).",
-      "\"items\" as a platform page (YouTube, Reddit, Bilibili, X…) shows items, each new or changed item once: data = { tabId, platform, items: [{ ref, url, title, authors, videoForm: short|long|post|unknown, tags: [{ name, confidence 1–5 }], tagsSettled, isPage }] }. The page itself is the item with isPage true (ref \"page\", title = the page's title); act on it with v.cover. tags come from Mac Vault's local classifier; tagsSettled is false until it answered — decide nothing about tags before that.",
+      "\"items\" as an accessible web page or supported feed (YouTube, Reddit, Bilibili, X…) shows items, each new or changed item once: data = { tabId, platform, items: [{ ref, url, title, authors, videoForm: short|long|post|unknown, tags: [{ name, confidence 1–5 }], tagsSettled, isPage }] }. The page itself is the item with isPage true (ref \"page\", title = the page's title); act on it with v.cover. tags come from the connected Mac Vault classifier; tagsSettled is false until it answered — decide nothing about tags before that.",
+      "Items also contain contentId (saved content), instanceId (current appearance), and attachments (this group's saved pill specs keyed by ID). v.attach(tabId, item, id, {type: pill, text, tone?, tooltip?}) saves a clickable pill; null removes it. Pass the complete item, not its ref. IDs1–80 ASCII letters/digits/_/-, text240 characters, tooltip1000, tones blue/cyan/gold/pink/red. Eight pills per group/content,32 total/content,10000 contents/group,8MB UTF-8 document. Stale handles/limits/storage errors are logged; no automatic retry or eviction. Saved pills survive navigation/restart/Run, hide on disable, return on reenable and disappear with group deletion. Linked groups keep separate attachments. Pointer/Enter/Space sends attachment event data {eventName: click, tabId, attachmentId, item, text} to the current group. Check item.attachments before invoking AI for an already annotated item. Pills are separate from classifier tags. Browser content only.",
       "v.item(tabId, ref, verdict) hides (\"hide\"), covers (\"dim\") or rescues (\"allow\") a feed item; null clears it. Groups higher in the list win.",
       "v.cover(tabId, on, message?) covers the page in place (or lifts it); a new address lifts it.",
       "v.go(tabId, url | \"back\" | \"forward\" | \"reload\") navigates. v.close(tabId) closes the tab.",
