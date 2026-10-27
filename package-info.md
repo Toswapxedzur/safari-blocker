@@ -21,3 +21,5 @@ Shared editor assets preserve current accepted translations, growing scrollable 
 - Public customer-audit patch 3.1.2 mirrors the dedicated Bilibili home-card author-name selector and preserves native authentication/permissions.
 
 - First-link recovery uses the canonical serialized contribution-before-adoption browser path. Generated `extension/background.js` preserves original Website entries and policy until the hub accepts the first contribution, including reconnects. Native hub changes are delivered by Mac Vault or Windows Vault separately; Store/public publication remains held.
+
+- Runtime custom-rule AI uses the canonical `rule-ai-client.js` preload and `rule-ai-ui.js` controls. Browser requests route through connected Mac Vault; the independent Safari JSC runtime emits generic AI actions and receives generation-bound AI events. `Tests/main.swift` covers an AI-driven cover, Run and cold-restart rejection. Generated production assets and the private development app build were checked on owner-selected Mini2 without replacing the public Safari app. New English text awaits the normal pre-release translation batch.

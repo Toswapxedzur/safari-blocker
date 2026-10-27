@@ -330,5 +330,25 @@ try memberCold.restore(memberColdJournal)
 _ = try memberCold.handleJournaled(["kind":"time-context","groupId":"a","context":["linked":true,"ready":true,"clusterId":"completion-members","state":memberShared,"acknowledgedSerial":0]],journal:memberColdJournal)
 let memberReconnected = try managedEvent(memberCold,memberColdJournal,"a","tick",memberStart+103)
 check(managedState(memberReconnected,"a")["ends"] as? Int == 1,"Safari member completion receipt survives journal restart and reconnect")
+// AI responses are events of the exact native rule instance, not journaled
+// operations that can replay after Run, disable or a cold restart.
+let aiEngine = try SafariRuleEngine(resources:resources)
+let aiJournal = try SafariRuleJournal(directory:directory,profile:"ai")
+let aiSource = #"(on,v)=>{on('panel',()=>v.ai({prompt:'Summarize',input:{text:'fixture'}}));on('ai',({data})=>{v.state.answer=data.text;v.cover(7,data.ok,data.text);});}"#
+let aiLoad: [String:Any] = ["kind":"load-source","groupId":"ai","source":aiSource,"state":[:]]
+_ = try aiEngine.handleJournaled(aiLoad,journal:aiJournal)
+let aiStart = try aiEngine.handleJournaled(["kind":"dispatch-event","descriptor":["type":"panel","groupId":"ai","data":[:]]],journal:aiJournal)
+let aiAction = (aiStart["actions"] as? [[String:Any]])?.first ?? [:]
+check(aiAction["kind"] as? String == "ai" && aiAction["generation"] as? String != nil,"Safari native forwards provider-neutral AI action with generation")
+let aiReply: [String:Any] = ["kind":"dispatch-event","descriptor":["type":"ai","groupId":"ai","data":["requestId":aiAction["requestId"] ?? "", "generation":aiAction["generation"] ?? "", "ok":true,"text":"Summary"]]]
+let aiResult = try aiEngine.handleJournaled(aiReply,journal:aiJournal)
+check((aiResult["actions"] as? [[String:Any]])?.first?["kind"] as? String == "cover","Safari native AI event can drive an ordinary browser action")
+_ = try aiEngine.handleJournaled(aiLoad,journal:aiJournal)
+let aiStale = try aiEngine.handleJournaled(aiReply,journal:aiJournal)
+check((aiStale["actions"] as? [[String:Any]])?.isEmpty == true,"Safari Run discards old AI reply")
+let aiCold = try SafariRuleEngine(resources:resources)
+try aiCold.restore(aiJournal)
+let aiColdReply = try aiCold.handleJournaled(aiReply,journal:aiJournal)
+check((aiColdReply["actions"] as? [[String:Any]])?.isEmpty == true,"Safari cold restart does not replay old AI result")
 print("SAFARI_NATIVE_RESULT: \(failures == 0 ? "OK" : "FAIL") (\(failures) failures)")
 exit(failures == 0 ? 0 : 1)
