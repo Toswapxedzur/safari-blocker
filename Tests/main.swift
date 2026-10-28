@@ -364,5 +364,17 @@ check((clicked["logs"] as? [[String:Any]])?.first != nil,"Safari current rule re
 var cachedHandle = contentHandle;cachedHandle["attachments"] = ["note":["type":"pill","text":"Saved"]]
 let cachedAttachment = try attached.handleJournaled(["kind":"dispatch-event","descriptor":["type":"items","data":["tabId":7,"items":[cachedHandle]]]],journal:attachmentJournal)
 check((cachedAttachment["actions"] as? [[String:Any]])?.isEmpty == true,"Safari rule can skip work for a saved content attachment")
+let generic = try SafariRuleEngine(resources:resources)
+let genericJournal = try SafariRuleJournal(directory:directory,profile:"generic-records")
+let genericSource = #"(on,v)=>{on('items',({data})=>v.attach(data.tabId,data.items[0],'form',{type:'html',html:'<button data-control="save">Save</button>',css:'.note{color:cyan}'}));on('attachment',ev=>{if(ev.origin==='user'&&ev.data.controlId==='save')v.store({op:'put',key:'feedback',value:{text:ev.data.value},ifRevision:null});});on('record',({data})=>v.log(data.ok,data.record?.value?.text));}"#
+_ = try generic.handleJournaled(["kind":"load-source","groupId":"generic","source":genericSource,"state":[:]],journal:genericJournal)
+let genericItems = try generic.handleJournaled(["kind":"dispatch-event","descriptor":["type":"items","data":["tabId":7,"items":[contentHandle]]]],journal:genericJournal)
+let htmlIntent = (genericItems["actions"] as? [[String:Any]])?.first ?? [:]
+check(htmlIntent["kind"] as? String == "attach" && (htmlIntent["spec"] as? [String:Any])?["type"] as? String == "html","Safari JSC forwards generic HTML/CSS attachment intent")
+let genericClick = try generic.handleJournaled(["kind":"dispatch-event","descriptor":["type":"attachment","origin":"user","data":["eventName":"click","controlId":"save","value":"Human","values":[:],"tabId":7,"attachmentId":"form","item":contentHandle]]],journal:genericJournal)
+let recordIntent = (genericClick["actions"] as? [[String:Any]])?.first ?? [:]
+check(recordIntent["kind"] as? String == "store" && recordIntent["payload"] as? String != nil && recordIntent["generation"] as? String != nil,"Safari user attachment event forwards a generic record action")
+let recordReply = try generic.handleJournaled(["kind":"dispatch-event","descriptor":["type":"record","data":["requestId":recordIntent["requestId"] ?? "","generation":recordIntent["generation"] ?? "","ok":true,"record":["value":["text":"Human"]]]]],journal:genericJournal)
+check((recordReply["logs"] as? [[String:Any]])?.first != nil,"Safari JSC accepts active generic record reply")
 print("SAFARI_NATIVE_RESULT: \(failures == 0 ? "OK" : "FAIL") (\(failures) failures)")
 exit(failures == 0 ? 0 : 1)

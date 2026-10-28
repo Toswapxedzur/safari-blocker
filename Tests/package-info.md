@@ -9,3 +9,4 @@
 - `bridge-origin.js`: actual generated background socket source preserves native-hub provenance, rejects an obsolete connection, and refuses classifier-origin Activity authority. These inert socket fixtures do not prove an authenticated native provider or live Safari acceptance.
 
 - `main.swift` also verifies managed timer panels/completion, website usage and shared fail-closed journal restart in the actual Safari JavaScriptCore adapter.
+- `main.swift` also checks generic HTML/CSS attachment intent, user-origin control events, record action forwarding and active reply delivery through the Safari JavaScriptCore adapter.
