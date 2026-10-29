@@ -94,7 +94,7 @@ Match = { tag: string, text: string, href: string, src: string,
 - `visible` comes from accessible, non-hidden pages; `elapsedMs` is time since their last heartbeat, zero while covered. It is not accumulated usage or playback time.
 - `items` reports each accessible HTTP(S) page (`platform: "web"` outside recognized sites), new/changed supported feed items, and resends them after Run/re-enable. `ref` identifies a card on that page, not a durable content ID; `ref === "page"` denotes the page itself. Empty titles/URLs/authors are possible. `authors` contains platform-specific source identifiers.
 - Platform IDs: `youtube`, `tiktok`, `facebook`, `instagram`, `twitch`, `reddit`, `discord`, `twitter`, `bluesky`, `threads`, `substack`, `bilibili`, `rumble`, `pinterest`, `kick`, `tumblr`, `peertube`, `pixelfed`, `kuaishou`. Item availability depends on the page's supported markup.
-- Tags require the connected desktop Classifier and a tagging-enabled build/platform (Chromium and Safari: YouTube, Reddit, Bilibili, X/`twitter`). Confidence is 1–5. `tagsSettled === false` is pending/unavailable, not untagged; settled `tags: []` is untagged.
+- Tags require the connected desktop Content tagging page and a tagging-enabled build/platform (Chromium and Safari: YouTube, Reddit, Bilibili, X/`twitter`). Confidence is 1–5. `tagsSettled === false` is pending/unavailable, not untagged; settled `tags: []` is untagged.
 - `snooze` means the group's Snooze button was pressed. It applies no pause by itself.
 - Query/file replies target the requesting group. Correlate `requestId`, check `error`/`ok`, and set a deadline using ticks: replies can be lost when a page closes, the engine reloads or the group is disabled. Request IDs can repeat after Run; pending requests are not durable work.
 - Record replies also target the requesting group. A changed rule or configuration drops obsolete replies. Record operations are asynchronous; the rule decides how to handle missing replies and conflicts.
@@ -197,13 +197,19 @@ Mac Vault; provider credentials stay there. Linked groups share the selection an
 optional daily request cap. Blank means no group cap; account limits still apply.
 The cap uses the UTC day, persists across restart, and counts submitted attempts
 including failures. Linking combines existing usage; unlinking retains prior usage.
+New selections use Medium reasoning when that model supports it. Saved selections
+keep their effort. The optional saved prompt and context are shared by linked
+groups and survive restart. They are available as `v.context.ai.prompt` and
+`v.context.ai.context` inside handlers; Vault does not automatically send them.
+The rule chooses what to include in each `v.ai` call. Editing either value
+invalidates replies from the old configuration.
 
 `v.ai({ prompt, input? })` returns a request ID immediately. Call it inside a handler,
 not while registering the rule. `input` may be any JSON value; each prompt/input is
 limited to20KB. Replies arrive as `ai` events: `{requestId, ok, text, citations,
 error}`. Success text is at most48KB; citations are `{url,title}`. Preserve visible,
 clickable source links when displaying answers based on web search. Search is always
-available to the model. Requests have a70-second deadline and bounded concurrency;
+available to the model. Generation requests have no fixed app deadline and retain bounded concurrency;
 there is no provider fallback or automatic retry. Responses are data, never executed
 as JavaScript. The rule decides which existing actions to take.
 
@@ -214,7 +220,7 @@ For a panel with an `ask` button and `note` field:
   let pending = null;
   on("panel", ({ data }) => {
     if (data.controlId !== "ask" || pending) return;
-    pending = v.ai({ prompt: "Summarize this text.", input: data.values?.note ?? "" });
+    pending = v.ai({ prompt: v.context.ai.prompt || "Summarize this text.", input: {context:v.context.ai.context, note:data.values?.note ?? ""} });
   });
   on("ai", ({ data }) => {
     if (data.requestId !== pending) return;
@@ -228,14 +234,15 @@ For a panel with an `ask` button and `note` field:
 Outstanding calls are not replayed after restart. Run, disable/re-enable and deletion
 discard obsolete replies; a disconnected browser reports `ai-unavailable`. Other
 errors include `ai-not-configured`, `ai-invalid-input`, `ai-busy`, `ai-daily-limit`,
-`ai-timeout`, `ai-request-failed` and `ai-usage-storage-unavailable`. Failed calls do
+`ai-request-failed` and `ai-usage-storage-unavailable`. Failed calls do
 not overwrite a previous result the rule chose to retain. Rule state still has its
 existing64KB limit.
 
 Tools can discover credential-free choices with `rule_ai_models` on Mac, or the
 browser's `settings-rule-ai-models`, and configure `ruleAI` through the existing
 set-group path. Its fields are `providerModel`, `accountID`, `reasoningEffort`
-(`default`, `low`, `medium`, `high`) and `dailyRequestLimit` (null or1–100000).
+ (`default`, `low`, `medium`, `high`), `dailyRequestLimit` (null or1–100000),
+`prompt` and `context` (optional strings, at most16KB each).
 Use a returned choice; do not put a key or provider URL into rule source.
 
 ## Group records

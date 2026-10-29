@@ -619,6 +619,7 @@
     let requestSeq = 0;
     let aiEpoch = 0;
     let contextRevision = "";
+    let aiContext = Object.freeze({prompt:"",context:""});
     const requestToken = () => generation + ":" + aiEpoch + ":" + contextRevision;
     let eventNow = null;
     const requestId = () => groupId + ":" + (++requestSeq);
@@ -720,7 +721,7 @@
       get: () => stateObj,
       set: (value) => { stateObj = isPlainObject(value) ? value : {}; }
     });
-    Object.defineProperty(v, "context", {enumerable:true,get:()=>Object.freeze({revision:requestToken()})});
+    Object.defineProperty(v, "context", {enumerable:true,get:()=>Object.freeze({revision:requestToken(),ai:aiContext})});
     Object.freeze(v);
 
     const on = (type, handler) => {
@@ -764,6 +765,12 @@
     return {
       groupId,
       configureRevision: value => { if(value!==undefined) contextRevision=String(value); },
+      configureAIContext: value => {
+        aiContext=Object.freeze({
+          prompt:typeof value?.prompt==="string"&&utf8Bytes(value.prompt)<=16000?value.prompt:"",
+          context:typeof value?.context==="string"&&utf8Bytes(value.context)<=16000?value.context:""
+        });
+      },
       acceptsAI: value => value === requestToken(),
       invalidateAI: () => { aiEpoch++; },
       error: registrationError,
@@ -939,6 +946,7 @@
         if (descriptor.targetGroupId && descriptor.targetGroupId !== groupId) continue;
         if (suppressed.has(groupId)) continue;
         rule.configureRevision(descriptor.contextRevisions?.[groupId]);
+        rule.configureAIContext(descriptor.aiContexts?.[groupId]);
         if (["ai", "record"].includes(descriptor.type) && !rule.acceptsAI(descriptor.data?.generation)) continue;
         if (rule.handles(descriptor.type)) queue.push({ rule, event: descriptor, depth: 0 });
       }
@@ -1146,7 +1154,7 @@
   const SHARED_REFERENCE = [
     "A rule is ONE JavaScript function expression: (on, v) => { … }. It runs once when the user presses Run: register handlers there. Run replaces the old handlers; deleting the group removes them. While the group is disabled no handler runs and what the rule did is lifted (its panels, style sheets, covers, blocks); enabling it resumes the rule as it was.",
     "on(type, handler) adds a handler; several per type are fine. handler(ev) gets ev = { type, now (ms since 1970), origin: host|user|rule, data }. Rendered control input has origin user; v.emit has origin rule. Handlers are synchronous and must finish within 1 s: no loops that wait, no network, no setTimeout/setInterval, no DOM of your own (you run in a sandbox).",
-    "v.ai({prompt, input?}) calls the AI connection/model configured for this custom group. Call it inside an event handler; it returns a request ID immediately. The later ai event has data {requestId, ok, text, citations:[{url,title}], error}. Handle errors explicitly; no fallback or automatic retries. Text is at most48KB; prompt/input each20KB; each call times out after70seconds. Search is always enabled. Keys stay in connected Mac Vault; disconnected browsers report ai-unavailable. Disabled/replaced rules discard old replies. Linked groups share settings and the optional UTC daily request cap; failed submitted attempts count and linking/unlinking does not reset usage. AI output is data and is never executed automatically. Preserve visible clickable citations if displaying web-derived answers.",
+    "v.ai({prompt, input?}) calls the AI connection/model configured for this custom group. Call it inside an event handler; it returns a request ID immediately. The later ai event has data {requestId, ok, text, citations:[{url,title}], error}. Handle errors explicitly; no fallback or automatic retries. Text is at most48KB; prompt/input each20KB; each call waits for the provider without a fixed Vault deadline. Search is always enabled. Keys stay in connected Mac Vault; disconnected browsers report ai-unavailable. Disabled/replaced rules discard old replies. Linked groups share settings and the optional UTC daily request cap; failed submitted attempts count and linking/unlinking does not reset usage. AI output is data and is never executed automatically. Preserve visible clickable citations if displaying web-derived answers.",
     "v.state is the group's memory: one JSON object (≤ 64 KB), kept across restarts and across Run (a new version of the rule finds what the old one saved), deleted with the group. Change it freely inside handlers.",
     "v.store({op:get|put|delete|list|clear, key?, value?, version?, ifRevision?, prefix?, after?, limit?}) starts a group-owned JSON record request inside a handler and returns its request ID. Later record events carry {requestId, ok, op, key?, record?, entries?, next?, deleted?, error?}. get returns a record or null; put returns the saved record; list returns sorted headers without values and an after cursor. Each record has value, opaque revision, caller version and updatedAt. For put/delete, omit ifRevision for unconditional writes, pass null to require absence, or pass the expected revision to require an exact match. A mismatch is store-conflict with the current record. Caller code decides cache policy and user-feedback priority; v.context.revision is an opaque configuration marker that may be included in a caller-chosen version. No automatic retries. Records are private to the owning group, persist across Run/restart, and are deleted with the group. Linked groups keep separate records. Each value is at most64KB; the store at most16MB. A group may start32 requests per second, across all groups128; overload reports one store-busy error per group/second and drops further requests that second.",
     "v.log(...values) writes to the group's log in the editor.",

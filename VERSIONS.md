@@ -2,7 +2,11 @@
 
 The owner approved this capability split on 2026-10-04. Existing tags and packaged downloads remain unchanged. All new records are **alpha, source-only**. A source record does not certify store submission, signing or native release acceptance.
 
-Current source version: **3.1.5**. See the group-level `CHANGELOG.md` for the cross-product chapters.
+Current candidate version: **3.2.0**. See the group-level `CHANGELOG.md` for the cross-product chapters.
+
+## 3.2.0 — 2026-10-29 — AI and generic content rules
+
+Packages the current shared browser rule API, including connected AI, durable records, and interactive saved content attachments. Public acceptance and publication are tracked separately from this source candidate.
 
 ## 3.1.5 — 2026-10-07 — Folder picker placement
 
