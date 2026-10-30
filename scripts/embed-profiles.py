@@ -55,7 +55,10 @@ def main():
         data = plistlib.loads(decoded)
         info = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())
         team, expected = validate_profile(data, info['CFBundleIdentifier'], group, team)
-        signing_entitlements = plistlib.loads((app.parent / 'SafariVault.entitlements').read_bytes())
+        base = 'SafariVault.entitlements' if bundle == app else 'SafariVaultExtension.entitlements'
+        signing_entitlements = plistlib.loads((app.parent / base).read_bytes())
+        if bundle == app:
+            signing_entitlements['com.apple.security.temporary-exception.mach-lookup.global-name'] = [bundle_id + '-spks', bundle_id + '-spki']
         signing_entitlements['com.apple.application-identifier'] = expected
         signing_entitlements['com.apple.developer.team-identifier'] = team
         if verify:

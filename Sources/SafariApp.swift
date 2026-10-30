@@ -1,16 +1,43 @@
 import AppKit
 import SafariServices
+import Sparkle
+
+final class SafariVaultUpdates {
+    static let shared = SafariVaultUpdates()
+    private var controller: SPUStandardUpdaterController?
+    var available: Bool { controller != nil }
+    var autoInstall: Bool {
+        guard let updater = controller?.updater else { return false }
+        return updater.automaticallyChecksForUpdates && updater.automaticallyDownloadsUpdates
+    }
+    private init() {}
+    func start() {
+        guard controller == nil,
+              Bundle.main.object(forInfoDictionaryKey: "VaultEnvironment") as? String == "production",
+              Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String == "https://customblocker.com/downloads/updates/safari/appcast.xml" else { return }
+        controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    }
+    func setAutoInstall(_ enabled: Bool) {
+        guard let updater = controller?.updater else { return }
+        updater.automaticallyChecksForUpdates = enabled
+        updater.automaticallyDownloadsUpdates = enabled
+    }
+    func checkManually() { controller?.checkForUpdates(nil) }
+}
 
 final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var status: NSTextField!
     private var heartbeat: Timer?
+    private var updateWindow: NSWindow?
+    private var autoUpdateCheckbox: NSButton?
     private let heartbeatGate = SafariHeartbeatGate()
     private var backgroundLaunch: Bool { CommandLine.arguments.contains("--background") }
     private var extensionID: String {
         Bundle.main.object(forInfoDictionaryKey: "VaultExtensionIdentifier") as? String ?? "com.adamancia.vault.safari.extension"
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
+        SafariVaultUpdates.shared.start()
         heartbeat = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.pulse() }
         pulse()
         if backgroundLaunch { NSApp.setActivationPolicy(.accessory); return }
@@ -69,6 +96,43 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
     }
+    @objc func openUpdateSettings() {
+        if updateWindow == nil {
+            let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 150),
+                                 styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            panel.title = SafariNativeLanguage.text("safari.updates.title", fallback: "Safari Vault Updates")
+            panel.center()
+            let stack = NSStackView()
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 16
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            let automatic = NSButton(checkboxWithTitle: SafariNativeLanguage.text("safari.updates.auto", fallback: "Auto install updates"),
+                                     target: self, action: #selector(toggleAutoUpdates))
+            let manual = NSButton(title: SafariNativeLanguage.text("safari.updates.check", fallback: "Check for updates"),
+                                  target: self, action: #selector(checkForUpdates))
+            automatic.isEnabled = SafariVaultUpdates.shared.available
+            manual.isEnabled = SafariVaultUpdates.shared.available
+            autoUpdateCheckbox = automatic
+            stack.addArrangedSubview(automatic)
+            stack.addArrangedSubview(manual)
+            panel.contentView?.addSubview(stack)
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: panel.contentView!.leadingAnchor, constant: 24),
+                stack.topAnchor.constraint(equalTo: panel.contentView!.topAnchor, constant: 24)
+            ])
+            updateWindow = panel
+        }
+        autoUpdateCheckbox?.state = SafariVaultUpdates.shared.autoInstall ? .on : .off
+        NSApp.setActivationPolicy(.regular)
+        updateWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    @objc private func toggleAutoUpdates() {
+        SafariVaultUpdates.shared.setAutoInstall(autoUpdateCheckbox?.state == .on)
+    }
+    @objc private func checkForUpdates() { SafariVaultUpdates.shared.checkManually() }
+
     private func refreshState() {
         queryState(force: true)
     }
@@ -132,17 +196,21 @@ struct SafariVaultMain {
         let application = NSApplication.shared
         // Programmatic AppKit applications need an explicit menu to route ⌘Q.
         // Closing onboarding keeps the independent companion running.
+        let delegate = SafariVaultAppDelegate()
         let menu = NSMenu()
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu(title: "Safari Vault")
         let quit = NSMenuItem(title: SafariNativeLanguage.text("safari.app.quit", fallback: "Quit Safari Vault"),
                               action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = application
+        let settings = NSMenuItem(title: SafariNativeLanguage.text("safari.updates.settings", fallback: "Settings…"),
+                                  action: #selector(SafariVaultAppDelegate.openUpdateSettings), keyEquivalent: ",")
+        settings.target = delegate
+        appMenu.addItem(settings)
         appMenu.addItem(quit)
         appMenuItem.submenu = appMenu
         menu.addItem(appMenuItem)
         application.mainMenu = menu
-        let delegate = SafariVaultAppDelegate()
         application.delegate = delegate
         withExtendedLifetime(delegate) { application.run() }
     }

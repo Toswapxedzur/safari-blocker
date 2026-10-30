@@ -15,6 +15,20 @@ case "$ARCH" in x86_64|arm64|universal) ;; *) echo "Invalid Safari architecture"
 EXTENSION="${SAFARI_VAULT_EXTENSION_SOURCE:-$ROOT/extension}"
 OUT="${SAFARI_VAULT_BUILD_DIRECTORY:-$ROOT/.build/safari-$ENVIRONMENT}"
 SDK="$(xcrun --sdk macosx --show-sdk-path)"
+SPARKLE_ARCHIVE="$ROOT/.build/dependencies/Sparkle-2.10.0.tar.xz"
+SPARKLE_DIR="$ROOT/.build/dependencies/Sparkle-2.10.0"
+SPARKLE_SHA256="c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c"
+mkdir -p "$(dirname "$SPARKLE_ARCHIVE")"
+if [ ! -f "$SPARKLE_ARCHIVE" ]; then
+  curl -fL --retry 3 -o "$SPARKLE_ARCHIVE.download" \
+    https://github.com/sparkle-project/Sparkle/releases/download/2.10.0/Sparkle-2.10.0.tar.xz
+  mv "$SPARKLE_ARCHIVE.download" "$SPARKLE_ARCHIVE"
+fi
+printf '%s  %s\n' "$SPARKLE_SHA256" "$SPARKLE_ARCHIVE" | shasum -a 256 -c -
+rm -rf "$SPARKLE_DIR"
+mkdir -p "$SPARKLE_DIR"
+tar -xJf "$SPARKLE_ARCHIVE" -C "$SPARKLE_DIR" ./Sparkle.framework
+SPARKLE_FRAMEWORK="$SPARKLE_DIR/Sparkle.framework"
 SUFFIX=""; NAME="Safari Vault"
 if [ "$ENVIRONMENT" = development ]; then SUFFIX=".development"; NAME="Safari Vault Development"; fi
 BUNDLE="com.adamancia.vault.safari$SUFFIX"
@@ -37,7 +51,8 @@ if '"environment": "'+environment+'"' not in config:
 PY
 mkdir -p "$OUT"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APPEX/Contents/MacOS" "$APPEX/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks" "$APPEX/Contents/MacOS" "$APPEX/Contents/Resources"
+cp -R "$SPARKLE_FRAMEWORK" "$APP/Contents/Frameworks/"
 cp "$ROOT/Assets/Branding/safari-vault.icns" "$APP/Contents/Resources/SafariVault.icns"
 cp -R "$EXTENSION/." "$APPEX/Contents/Resources/"
 cp -R "$EXTENSION/translation" "$APP/Contents/Resources/translation"
@@ -50,7 +65,12 @@ version=json.loads((pathlib.Path(appex)/'Contents/Resources/manifest.json').read
 base={'CFBundleInfoDictionaryVersion':'6.0','CFBundleShortVersionString':version,'CFBundleVersion':version,
       'LSMinimumSystemVersion':'13.0','VaultEnvironment':environment}
 a=dict(base,CFBundleIdentifier=bundle,CFBundleName=name,CFBundleDisplayName=name,CFBundleExecutable='SafariVault',
-       CFBundleIconFile='SafariVault.icns',CFBundlePackageType='APPL',NSPrincipalClass='NSApplication',VaultExtensionIdentifier=bundle+'.extension')
+       CFBundleIconFile='SafariVault.icns',CFBundlePackageType='APPL',NSPrincipalClass='NSApplication',VaultExtensionIdentifier=bundle+'.extension',
+       SUFeedURL='https://customblocker.com/downloads/updates/safari/appcast.xml',
+       SUPublicEDKey='Ez+6XXyjRGVtyJWh1iaGM1H61sQ6wHEdNH6vuSxMZxU=',
+       SUEnableAutomaticChecks=False,SUAutomaticallyUpdate=False,SURequireSignedFeed=True,
+       SUVerifyUpdateBeforeExtraction=True,SUSignedFeedFailureExpirationInterval=0,
+       SUEnableInstallerLauncherService=True)
 e=dict(base,CFBundleIdentifier=bundle+'.extension',CFBundleName='Safari Vault Extension',CFBundleExecutable='SafariVaultExtension',
        CFBundlePackageType='XPC!',NSExtension={'NSExtensionPointIdentifier':'com.apple.Safari.web-extension',
                                            'NSExtensionPrincipalClass':'SafariWebExtensionHandler'})
@@ -59,8 +79,11 @@ e=dict(base,CFBundleIdentifier=bundle+'.extension',CFBundleName='Safari Vault Ex
 entitlements={'com.apple.security.app-sandbox':True,'com.apple.security.application-groups':[group],
               'com.apple.security.network.client':True,'com.apple.security.files.user-selected.read-write':True,
               'com.apple.security.files.bookmarks.app-scope':True}
+app_entitlements=dict(entitlements)
+app_entitlements['com.apple.security.temporary-exception.mach-lookup.global-name']=[bundle+'-spks',bundle+'-spki']
 for path,value in [(pathlib.Path(app)/'Contents/Info.plist',a),(pathlib.Path(appex)/'Contents/Info.plist',e),
-                   (pathlib.Path(app).parent/'SafariVault.entitlements',entitlements)]:
+                   (pathlib.Path(app).parent/'SafariVault.entitlements',app_entitlements),
+                   (pathlib.Path(app).parent/'SafariVaultExtension.entitlements',entitlements)]:
     with path.open('wb') as f: plistlib.dump(value,f)
 PY
 ARCHES=("$ARCH")
@@ -68,6 +91,7 @@ if [ "$ARCH" = universal ]; then ARCHES=(x86_64 arm64); fi
 for BUILD_ARCH in "${ARCHES[@]}"; do
   xcrun swiftc -sdk "$SDK" -target "$BUILD_ARCH-apple-macos13.0" -O -parse-as-library \
     -module-name SafariVault "$ROOT/Sources/SafariApp.swift" "$ROOT/Sources/SafariHeartbeatGate.swift" "$ROOT/Sources/SafariNativeLanguage.swift" \
+    -F "$SPARKLE_DIR" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
     -o "$OUT/SafariVault-$BUILD_ARCH"
   xcrun swiftc -sdk "$SDK" -target "$BUILD_ARCH-apple-macos13.0" -O -application-extension \
     -parse-as-library -module-name SafariVaultExtension \
@@ -82,7 +106,7 @@ else
   cp "$OUT/SafariVaultExtension-$ARCH" "$APPEX/Contents/MacOS/SafariVaultExtension"
 fi
 APP_ENTITLEMENTS="$OUT/SafariVault.entitlements"
-EXTENSION_ENTITLEMENTS="$OUT/SafariVault.entitlements"
+EXTENSION_ENTITLEMENTS="$OUT/SafariVaultExtension.entitlements"
 if [ "$IDENTITY" != - ]; then
   python3 "$ROOT/scripts/embed-profiles.py" "$APP" "$APPEX" "$GROUP" "$APP_PROFILE" "$EXTENSION_PROFILE"
   APP_ENTITLEMENTS="$OUT/$NAME.app.entitlements"
@@ -90,6 +114,11 @@ if [ "$IDENTITY" != - ]; then
 fi
 SIGN_FLAGS=(--force --sign "$IDENTITY")
 if [ "$IDENTITY" != - ]; then SIGN_FLAGS+=(--options runtime --timestamp); fi
+codesign "${SIGN_FLAGS[@]}" "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"
+codesign "${SIGN_FLAGS[@]}" --preserve-metadata=entitlements "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc"
+codesign "${SIGN_FLAGS[@]}" "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"
+codesign "${SIGN_FLAGS[@]}" "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app"
+codesign "${SIGN_FLAGS[@]}" "$APP/Contents/Frameworks/Sparkle.framework"
 codesign "${SIGN_FLAGS[@]}" --entitlements "$EXTENSION_ENTITLEMENTS" "$APPEX"
 codesign "${SIGN_FLAGS[@]}" --entitlements "$APP_ENTITLEMENTS" "$APP"
 codesign --verify --deep --strict "$APP"
