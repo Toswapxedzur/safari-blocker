@@ -67,7 +67,7 @@ base={'CFBundleInfoDictionaryVersion':'6.0','CFBundleShortVersionString':version
 a=dict(base,CFBundleIdentifier=bundle,CFBundleName=name,CFBundleDisplayName=name,CFBundleExecutable='SafariVault',
        CFBundleIconFile='SafariVault.icns',CFBundlePackageType='APPL',NSPrincipalClass='NSApplication',VaultExtensionIdentifier=bundle+'.extension',
        SUFeedURL='https://customblocker.com/downloads/updates/safari/appcast.xml',
-       SUPublicEDKey='Ez+6XXyjRGVtyJWh1iaGM1H61sQ6wHEdNH6vuSxMZxU=',
+       SUPublicEDKey='NMa2aeP4CgnaXbFulYqG6wMOEQjJjwORHCA60hjyOmo=',
        SUEnableAutomaticChecks=False,SUAutomaticallyUpdate=False,SURequireSignedFeed=True,
        SUVerifyUpdateBeforeExtraction=True,SUSignedFeedFailureExpirationInterval=0,
        SUEnableInstallerLauncherService=True)

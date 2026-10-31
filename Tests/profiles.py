@@ -64,6 +64,8 @@ with tempfile.TemporaryDirectory(prefix='safari-profile-fixture-') as temporary:
         (bundle / 'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': identifier}))
     (base / 'SafariVault.entitlements').write_bytes(plistlib.dumps({
         'com.apple.security.app-sandbox': True, 'com.apple.security.application-groups': [GROUP]}))
+    (base / 'SafariVaultExtension.entitlements').write_bytes(plistlib.dumps({
+        'com.apple.security.app-sandbox': True, 'com.apple.security.application-groups': [GROUP]}))
     fixtures = base / 'profiles'
     fixtures.mkdir()
     for name, identifier in [('app', BUNDLE), ('extension', BUNDLE + '.extension')]:
@@ -98,6 +100,9 @@ else:
     env = {**os.environ, 'PATH': str(tools) + ':' + os.environ['PATH'], 'SAFARI_FIXTURE_OUTPUT': str(base)}
     args = [str(app), str(extension), GROUP, str(fixtures / 'app.provisionprofile'), str(fixtures / 'extension.provisionprofile')]
     subprocess.run([sys.executable, str(path), *args], env=env, check=True, capture_output=True)
+    app_entitlements = plistlib.loads((base / (app.name + '.entitlements')).read_bytes())
+    assert app_entitlements['com.apple.security.temporary-exception.mach-lookup.global-name'] == [
+        BUNDLE + '-spks', BUNDLE + '-spki']
     assert (app / 'Contents/embedded.provisionprofile').read_bytes() == (fixtures / 'app.provisionprofile').read_bytes()
     assert (extension / 'Contents/embedded.provisionprofile').read_bytes() == (fixtures / 'extension.provisionprofile').read_bytes()
     subprocess.run([sys.executable, str(path), '--verify', *args], env=env, check=True, capture_output=True)
