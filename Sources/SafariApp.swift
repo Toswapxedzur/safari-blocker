@@ -29,7 +29,6 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var status: NSTextField!
     private var heartbeat: Timer?
-    private var updateWindow: NSWindow?
     private var autoUpdateCheckbox: NSButton?
     private let heartbeatGate = SafariHeartbeatGate()
     private var backgroundLaunch: Bool { CommandLine.arguments.contains("--background") }
@@ -45,7 +44,7 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
     }
     private func showOnboarding() {
         NSApp.setActivationPolicy(.regular)
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 530, height: 380), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 530, height: 430), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "Safari Vault"
         window.appearance = NSAppearance(named: .aqua)
         window.backgroundColor = NSColor(calibratedRed: 0.973, green: 0.980, blue: 0.988, alpha: 1)
@@ -76,8 +75,32 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
         title.textColor = NSColor(calibratedRed: 0.118, green: 0.161, blue: 0.231, alpha: 1)
         body.textColor = title.textColor
         status.textColor = NSColor(calibratedRed: 0.392, green: 0.455, blue: 0.545, alpha: 1)
+        let updates = NSStackView()
+        updates.orientation = .vertical
+        updates.alignment = SafariNativeLanguage.language == "ar" ? .trailing : .leading
+        updates.spacing = 10
+        let settingsTitle = SafariNativeLanguage.text("safari.updates.settings", fallback: "Settings")
+            .replacingOccurrences(of: "…", with: "")
+        let updatesTitle = NSTextField(labelWithString: settingsTitle)
+        updatesTitle.font = NSFont(name: "Arial Bold", size: 14) ?? .systemFont(ofSize: 14, weight: .semibold)
+        updatesTitle.textColor = title.textColor
+        let automatic = NSButton(checkboxWithTitle: SafariNativeLanguage.text("safari.updates.auto", fallback: "Auto install updates"),
+                                 target: self, action: #selector(toggleAutoUpdates))
+        automatic.state = SafariVaultUpdates.shared.autoInstall ? .on : .off
+        automatic.isEnabled = SafariVaultUpdates.shared.available
+        let manual = NSButton(title: SafariNativeLanguage.text("safari.updates.check", fallback: "Check for updates"),
+                              target: self, action: #selector(checkForUpdates))
+        manual.bezelStyle = .inline
+        manual.isBordered = false
+        manual.contentTintColor = NSColor(calibratedRed: 0.118, green: 0.227, blue: 0.541, alpha: 1)
+        manual.isEnabled = SafariVaultUpdates.shared.available
+        autoUpdateCheckbox = automatic
+        updates.addArrangedSubview(updatesTitle)
+        updates.addArrangedSubview(automatic)
+        updates.addArrangedSubview(manual)
         stack.addArrangedSubview(title); stack.addArrangedSubview(body)
         stack.addArrangedSubview(button); stack.addArrangedSubview(status)
+        stack.addArrangedSubview(updates)
         window.contentView?.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 28),
@@ -97,35 +120,10 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     @objc func openUpdateSettings() {
-        if updateWindow == nil {
-            let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 150),
-                                 styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            panel.title = SafariNativeLanguage.text("safari.updates.title", fallback: "Safari Vault Updates")
-            panel.center()
-            let stack = NSStackView()
-            stack.orientation = .vertical
-            stack.alignment = .leading
-            stack.spacing = 16
-            stack.translatesAutoresizingMaskIntoConstraints = false
-            let automatic = NSButton(checkboxWithTitle: SafariNativeLanguage.text("safari.updates.auto", fallback: "Auto install updates"),
-                                     target: self, action: #selector(toggleAutoUpdates))
-            let manual = NSButton(title: SafariNativeLanguage.text("safari.updates.check", fallback: "Check for updates"),
-                                  target: self, action: #selector(checkForUpdates))
-            automatic.isEnabled = SafariVaultUpdates.shared.available
-            manual.isEnabled = SafariVaultUpdates.shared.available
-            autoUpdateCheckbox = automatic
-            stack.addArrangedSubview(automatic)
-            stack.addArrangedSubview(manual)
-            panel.contentView?.addSubview(stack)
-            NSLayoutConstraint.activate([
-                stack.leadingAnchor.constraint(equalTo: panel.contentView!.leadingAnchor, constant: 24),
-                stack.topAnchor.constraint(equalTo: panel.contentView!.topAnchor, constant: 24)
-            ])
-            updateWindow = panel
-        }
+        if window == nil { showOnboarding() }
         autoUpdateCheckbox?.state = SafariVaultUpdates.shared.autoInstall ? .on : .off
         NSApp.setActivationPolicy(.regular)
-        updateWindow?.makeKeyAndOrderFront(nil)
+        window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
     @objc private func toggleAutoUpdates() {
