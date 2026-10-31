@@ -42,6 +42,16 @@ fi
 APP="$OUT/$NAME.app"
 APPEX="$APP/Contents/PlugIns/SafariVaultExtension.appex"
 if [ ! -f "$EXTENSION/manifest.json" ]; then echo "Generate Safari assets first: ./build.sh --environment $ENVIRONMENT" >&2; exit 1; fi
+BUILD_VERSION="$(python3 - "$EXTENSION/manifest.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1], encoding='utf-8'))['version'])
+PY
+)"
+if [ -n "${SAFARI_VAULT_EXPECTED_VERSION:-}" ] && [ "$BUILD_VERSION" != "$SAFARI_VAULT_EXPECTED_VERSION" ]; then
+  echo "Safari version mismatch: expected $SAFARI_VAULT_EXPECTED_VERSION, manifest has $BUILD_VERSION" >&2
+  exit 2
+fi
+echo "[build-app] version=$BUILD_VERSION environment=$ENVIRONMENT architecture=$ARCH"
 python3 - "$EXTENSION" "$ENVIRONMENT" <<'PY'
 import json, pathlib, sys
 root=pathlib.Path(sys.argv[1]); environment=sys.argv[2]

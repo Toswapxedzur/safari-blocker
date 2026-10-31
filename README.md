@@ -17,6 +17,7 @@ SAFARI_VAULT_ENVIRONMENT=development ./scripts/build-app.sh
 ```
 
 The native script creates a separate `Safari Vault Development.app` containing `SafariVaultExtension.appex`, compiles both with macOS 13 as the deployment target, and signs the complete bundle. The default architecture is the build host's architecture; use `SAFARI_VAULT_ARCH=universal` for Intel and Apple silicon binaries. A compiled architecture is not a substitute for testing it on matching hardware.
+For a private release fixture, set `SAFARI_VAULT_EXPECTED_VERSION` to the intended version. The build stops before replacing its output when the generated extension manifest has another version; verify the resulting app, nested extension and manifest versions before naming the DMG.
 
 A production build uses `./build.sh --environment production` and `SAFARI_VAULT_ENVIRONMENT=production`. Set `SAFARI_VAULT_SIGNING_IDENTITY` to the appropriate Apple signing identity and provide `SAFARI_VAULT_APP_PROVISIONING_PROFILE` and `SAFARI_VAULT_EXTENSION_PROVISIONING_PROFILE`. Both profiles must authorize their bundle IDs and the shared Vault App Group under the same developer team. The script validates and embeds them without logging their private contents. Then use Apple's normal notarization or App Store submission process. Production builds reject ad-hoc signing.
 
