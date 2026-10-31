@@ -19,8 +19,15 @@ final class SafariVaultUpdates {
     }
     func setAutoInstall(_ enabled: Bool) {
         guard let updater = controller?.updater else { return }
-        updater.automaticallyChecksForUpdates = enabled
-        updater.automaticallyDownloadsUpdates = enabled
+        if enabled {
+            updater.automaticallyChecksForUpdates = true
+            updater.automaticallyDownloadsUpdates = true
+        } else {
+            // Sparkle only permits changing automatic downloads while
+            // automatic checks are enabled.
+            updater.automaticallyDownloadsUpdates = false
+            updater.automaticallyChecksForUpdates = false
+        }
     }
     func checkManually() { controller?.checkForUpdates(nil) }
 }
