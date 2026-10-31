@@ -24,7 +24,7 @@ An ad-hoc build verifies compilation and bundle structure, but is not a signed r
 
 ## Enable
 
-Run the containing app once, click **Open Safari Extensions**, enable Safari Vault, and allow access to **all websites**. Safari owns these permission settings. The app explains the grant but does not change the user's security settings.
+The direct-download Safari Vault build requires Safari 18.4 or later to load its Developer ID-signed web extension ([Apple's Safari 18.4 release notes](https://developer.apple.com/documentation/safari-release-notes/safari-18_4-release-notes)). Safari 18.4 is available for macOS Ventura and Sonoma, so the app's macOS 13 deployment target remains valid. On older Safari, the containing app keeps its updater controls available and explains the Safari requirement in its existing window; the extension-settings button is disabled until Safari is updated. Run the containing app once, click **Open Safari Extensions**, enable Safari Vault, and allow access to **all websites**. Safari owns these permission settings. The app explains the grant but does not change the user's security settings.
 
 Safari packaging specializes the shared popup's site-access check and request to HTTP and HTTPS origins. Safari ignores file-scheme grants, so testing Chrome's `<all_urls>` wildcard would incorrectly show limited access even after an all-websites grant. A failed web-origin check still shows the warning.
 

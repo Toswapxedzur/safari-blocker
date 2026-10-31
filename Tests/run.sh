@@ -21,6 +21,8 @@ python3 "$ROOT/Tests/native-language.py"
 xcrun swiftc -sdk "$(xcrun --sdk macosx --show-sdk-path)" -application-extension -parse-as-library \
   "$ROOT/Sources/SafariHeartbeatGate.swift" "$ROOT/Tests/heartbeat.swift" -o "$OUT/SafariHeartbeatGateTests"
 "$OUT/SafariHeartbeatGateTests"
+xcrun swiftc -parse-as-library "$ROOT/Sources/SafariVersionGate.swift" "$ROOT/Tests/safari-version.swift" -o "$OUT/SafariVersionGateTests"
+"$OUT/SafariVersionGateTests"
 
 NODE="${SAFARI_VAULT_TEST_NODE:-$(command -v node || true)}"
 if [ -z "$NODE" ]; then NODE="$HOME/.local/node-v24.20.0-darwin-x64/bin/node"; fi

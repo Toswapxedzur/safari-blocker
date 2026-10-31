@@ -39,6 +39,15 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
     private var autoUpdateCheckbox: NSButton?
     private let heartbeatGate = SafariHeartbeatGate()
     private var backgroundLaunch: Bool { CommandLine.arguments.contains("--background") }
+    private var safariVersionSupported: Bool {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Safari") else { return false }
+        let version = Bundle(url: url)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        return SafariVersionGate.supportsDeveloperIDExtensions(version)
+    }
+    private var safariRequirementMessage: String {
+        SafariNativeLanguage.text("safari.setup.minimumVersion",
+                                  fallback: "Safari Vault requires Safari 18.4 or later. Update Safari to enable the extension.")
+    }
     private var extensionID: String {
         Bundle.main.object(forInfoDictionaryKey: "VaultExtensionIdentifier") as? String ?? "com.adamancia.vault.safari.extension"
     }
@@ -63,10 +72,13 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
         stack.translatesAutoresizingMaskIntoConstraints = false
         let title = NSTextField(labelWithString: "Safari Vault")
         title.font = NSFont(name: "Arial Bold", size: 26) ?? .systemFont(ofSize: 26, weight: .semibold)
-        let body = NSTextField(wrappingLabelWithString: SafariNativeLanguage.text("safari.setup.body", fallback: "Enable Safari Vault in Safari Extensions, then allow access to all websites. Browser blocking and custom rules work independently. Connect Mac Vault for tagging, shared groups and Activity."))
+        let body = NSTextField(wrappingLabelWithString: safariVersionSupported
+            ? SafariNativeLanguage.text("safari.setup.body", fallback: "Enable Safari Vault in Safari Extensions, then allow access to all websites. Browser blocking and custom rules work independently. Connect Mac Vault for tagging, shared groups and Activity.")
+            : safariRequirementMessage)
         body.font = NSFont(name: "Arial", size: 14) ?? .systemFont(ofSize: 14)
         body.alignment = SafariNativeLanguage.language == "ar" ? .right : .left
         let button = NSButton(title: SafariNativeLanguage.text("safari.setup.open", fallback: "Open Safari Extensions"), target: self, action: #selector(openPreferences))
+        button.isEnabled = safariVersionSupported
         button.bezelStyle = .inline
         button.isBordered = false
         button.wantsLayer = true
@@ -119,6 +131,7 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
         refreshState()
     }
     @objc private func openPreferences() {
+        guard safariVersionSupported else { status.stringValue = safariRequirementMessage; return }
         SFSafariApplication.showPreferencesForExtension(withIdentifier: extensionID) { [weak self] error in
             DispatchQueue.main.async {
                 if error != nil { self?.status.stringValue = SafariNativeLanguage.text("safari.setup.openFailed", fallback: "Safari could not open the extension settings. Open Safari Settings → Extensions.") }
@@ -142,6 +155,7 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
         queryState(force: true)
     }
     private func queryState(force: Bool = false) {
+        guard safariVersionSupported else { status?.stringValue = ""; return }
         guard let query = heartbeatGate.beginStateQuery(now: ProcessInfo.processInfo.systemUptime, force: force) else { return }
         SFSafariExtensionManager.getStateOfSafariExtension(withIdentifier: extensionID) { [weak self] state, error in
             DispatchQueue.main.async {

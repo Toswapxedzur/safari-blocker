@@ -7,7 +7,8 @@ enum SafariNativeLanguage {
             "safari.updates.settings": "设置…",
             "safari.updates.title": "Safari Vault 更新",
             "safari.updates.auto": "自动安装更新",
-            "safari.updates.check": "检查更新"
+            "safari.updates.check": "检查更新",
+            "safari.setup.minimumVersion": "Safari Vault 需要 Safari 18.4 或更高版本。更新 Safari 后才能启用扩展。"
         ]
     ]
     public static var language: String {

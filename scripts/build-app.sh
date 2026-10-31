@@ -90,7 +90,7 @@ ARCHES=("$ARCH")
 if [ "$ARCH" = universal ]; then ARCHES=(x86_64 arm64); fi
 for BUILD_ARCH in "${ARCHES[@]}"; do
   xcrun swiftc -sdk "$SDK" -target "$BUILD_ARCH-apple-macos13.0" -O -parse-as-library \
-    -module-name SafariVault "$ROOT/Sources/SafariApp.swift" "$ROOT/Sources/SafariHeartbeatGate.swift" "$ROOT/Sources/SafariNativeLanguage.swift" \
+    -module-name SafariVault "$ROOT/Sources/SafariApp.swift" "$ROOT/Sources/SafariHeartbeatGate.swift" "$ROOT/Sources/SafariNativeLanguage.swift" "$ROOT/Sources/SafariVersionGate.swift" \
     -F "$SPARKLE_DIR" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
     -o "$OUT/SafariVault-$BUILD_ARCH"
   xcrun swiftc -sdk "$SDK" -target "$BUILD_ARCH-apple-macos13.0" -O -application-extension \
