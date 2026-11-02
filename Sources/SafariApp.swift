@@ -46,7 +46,7 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
     }
     private var safariRequirementMessage: String {
         SafariNativeLanguage.text("safari.setup.minimumVersion",
-                                  fallback: "Safari Vault requires Safari 18.4 or later. Update Safari to enable the extension.")
+                                  fallback: "Vault requires Safari 18.4 or later. Update Safari to enable the extension.")
     }
     private var extensionID: String {
         Bundle.main.object(forInfoDictionaryKey: "VaultExtensionIdentifier") as? String ?? "com.adamancia.vault.safari.extension"
@@ -61,7 +61,7 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
     private func showOnboarding() {
         NSApp.setActivationPolicy(.regular)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 530, height: 430), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "Safari Vault"
+        window.title = "Vault"
         window.appearance = NSAppearance(named: .aqua)
         window.backgroundColor = NSColor(calibratedRed: 0.973, green: 0.980, blue: 0.988, alpha: 1)
         window.center()
@@ -70,10 +70,10 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
         stack.alignment = SafariNativeLanguage.language == "ar" ? .trailing : .leading
         stack.spacing = 18
         stack.translatesAutoresizingMaskIntoConstraints = false
-        let title = NSTextField(labelWithString: "Safari Vault")
+        let title = NSTextField(labelWithString: "Vault")
         title.font = NSFont(name: "Arial Bold", size: 26) ?? .systemFont(ofSize: 26, weight: .semibold)
         let body = NSTextField(wrappingLabelWithString: safariVersionSupported
-            ? SafariNativeLanguage.text("safari.setup.body", fallback: "Enable Safari Vault in Safari Extensions, then allow access to all websites. Browser blocking and custom rules work independently. Connect Mac Vault for tagging, shared groups and Activity.")
+            ? SafariNativeLanguage.text("safari.setup.body", fallback: "Enable Vault in Safari Extensions, then allow access to all websites. Browser blocking and custom rules work independently. Connect to Vault on Mac for tagging, shared groups and Activity.")
             : safariRequirementMessage)
         body.font = NSFont(name: "Arial", size: 14) ?? .systemFont(ofSize: 14)
         body.alignment = SafariNativeLanguage.language == "ar" ? .right : .left
@@ -162,8 +162,8 @@ final class SafariVaultAppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.heartbeatGate.completeStateQuery(query, enabled: error == nil ? state?.isEnabled : nil)
                 self.status?.stringValue = self.heartbeatGate.extensionEnabled == true
-                    ? SafariNativeLanguage.text("safari.setup.enabled", fallback: "Safari Vault is enabled. Allow access to all websites in Safari's extension settings.")
-                    : SafariNativeLanguage.text("safari.setup.disabled", fallback: "Enable Safari Vault and allow access to all websites in Safari's extension settings.")
+                    ? SafariNativeLanguage.text("safari.setup.enabled", fallback: "Vault is enabled. Allow access to all websites in Safari's extension settings.")
+                    : SafariNativeLanguage.text("safari.setup.disabled", fallback: "Enable Vault and allow access to all websites in Safari's extension settings.")
                 self.pulse()
             }
         }
@@ -218,8 +218,8 @@ struct SafariVaultMain {
         let delegate = SafariVaultAppDelegate()
         let menu = NSMenu()
         let appMenuItem = NSMenuItem()
-        let appMenu = NSMenu(title: "Safari Vault")
-        let quit = NSMenuItem(title: SafariNativeLanguage.text("safari.app.quit", fallback: "Quit Safari Vault"),
+        let appMenu = NSMenu(title: "Vault")
+        let quit = NSMenuItem(title: SafariNativeLanguage.text("safari.app.quit", fallback: "Quit Vault"),
                               action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = application
         let settings = NSMenuItem(title: SafariNativeLanguage.text("safari.updates.settings", fallback: "Settings…"),

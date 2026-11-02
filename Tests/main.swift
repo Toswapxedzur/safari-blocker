@@ -334,7 +334,7 @@ check(managedState(memberReconnected,"a")["ends"] as? Int == 1,"Safari member co
 // operations that can replay after Run, disable or a cold restart.
 let aiEngine = try SafariRuleEngine(resources:resources)
 let aiJournal = try SafariRuleJournal(directory:directory,profile:"ai")
-let aiSource = #"(on,v)=>{on('panel',()=>v.ai({prompt:'Summarize',input:{text:'fixture'}}));on('ai',({data})=>{v.state.answer=data.text;v.cover(7,data.ok,data.text);});}"#
+let aiSource = #"(on,v)=>{on('panel',()=>v.ai({model:'chatgpt:test',prompt:'Summarize',input:{text:'fixture'}}));on('ai',({data})=>{v.state.answer=data.text;v.cover(7,data.ok,data.text);});}"#
 let aiLoad: [String:Any] = ["kind":"load-source","groupId":"ai","source":aiSource,"state":[:]]
 _ = try aiEngine.handleJournaled(aiLoad,journal:aiJournal)
 let aiStart = try aiEngine.handleJournaled(["kind":"dispatch-event","descriptor":["type":"panel","groupId":"ai","data":[:]]],journal:aiJournal)

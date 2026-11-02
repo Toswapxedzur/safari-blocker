@@ -31,7 +31,7 @@ final class SafariFileBroker {
                 }
             }
             let panel = NSOpenPanel()
-            panel.title = SafariNativeLanguage.text("safari.folderTitle", fallback: "Choose a folder for Safari Vault custom rules")
+            panel.title = SafariNativeLanguage.text("safari.folderTitle", fallback: "Choose a folder for Vault custom rules")
             panel.canChooseFiles = false
             panel.canChooseDirectories = true
             panel.allowsMultipleSelection = false

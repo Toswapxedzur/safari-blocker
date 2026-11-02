@@ -8,7 +8,7 @@ Safari requests `storage` and `unlimitedStorage` for local extension settings. T
 
 ## Build
 
-All product testing and build verification run on mini1. Apple Command Line Tools with the macOS SDK are sufficient; the Safari extension converter and an Xcode project are not required.
+All product testing and build verification run on Mini2. Apple Command Line Tools with the macOS SDK are sufficient; the Safari extension converter and an Xcode project are not required.
 
 ```sh
 ./build.sh --environment development

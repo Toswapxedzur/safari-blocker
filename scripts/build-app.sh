@@ -74,7 +74,7 @@ app,appex,bundle,group,environment,name=sys.argv[1:]
 version=json.loads((pathlib.Path(appex)/'Contents/Resources/manifest.json').read_text())['version']
 base={'CFBundleInfoDictionaryVersion':'6.0','CFBundleShortVersionString':version,'CFBundleVersion':version,
       'LSMinimumSystemVersion':'13.0','VaultEnvironment':environment}
-a=dict(base,CFBundleIdentifier=bundle,CFBundleName=name,CFBundleDisplayName=name,CFBundleExecutable='SafariVault',
+a=dict(base,CFBundleIdentifier=bundle,CFBundleName=name,CFBundleDisplayName='Adamancia Vault for Safari' + (' Development' if environment == 'development' else ''),CFBundleExecutable='SafariVault',
        CFBundleIconFile='SafariVault.icns',CFBundlePackageType='APPL',NSPrincipalClass='NSApplication',VaultExtensionIdentifier=bundle+'.extension',
        SUFeedURL='https://customblocker.com/downloads/updates/safari/appcast.xml',
        SUPublicEDKey='Ez+6XXyjRGVtyJWh1iaGM1H61sQ6wHEdNH6vuSxMZxU=',

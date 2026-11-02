@@ -41,7 +41,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             // this context cannot launch Safari after it quits, unlike the
             // containing app's SFSafariApplication.dispatchMessage API.
             let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
-                                                                reason: "Safari Vault browser heartbeat")
+                                                                reason: "Vault browser heartbeat")
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 1) {
                 ProcessInfo.processInfo.endActivity(activity)
                 Self.respond(context, ["ok": true, "type": "safari-lifecycle-tick"])
@@ -81,7 +81,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         configuration.arguments = ["--background"]
         DispatchQueue.main.async {
             NSWorkspace.shared.openApplication(at: app, configuration: configuration) { _, error in
-                completion(error == nil ? ["ok": true] : ["ok": false, "error": "Safari Vault's background helper could not start."])
+                completion(error == nil ? ["ok": true] : ["ok": false, "error": "Vault's background helper could not start."])
             }
         }
     }
