@@ -138,7 +138,9 @@
   }
 
   function findVideoID(root) {
-    const links = root.querySelectorAll('a#thumbnail[href], a#video-title-link[href], a[href*="watch?v="], a[href*="/shorts/"], a[href*="/live/"]');
+    let links = root.querySelectorAll('a#thumbnail[href], a#video-title-link[href], a[href*="watch?v="], a[href*="/shorts/"], a[href*="/live/"]');
+    // Some embedded renderers still expose only the earlier selector set.
+    if (!links.length) links = root.querySelectorAll('a#thumbnail[href], a#video-title-link[href], a[href*="watch?v="], a[href*="/shorts/"]');
     for (const link of links) {
       const id = C.youtubeVideoIDFromURL(link.getAttribute("href") || "", location.href);
       if (id) return id;
@@ -602,7 +604,7 @@
     }
     if (entry.entryID && taggingEnabled) TagUI?.observe?.({
       platform: PLATFORM, entryID: entry.entryID,
-      creatorID: entry.sourceID || `${PLATFORM}:collab:${entry.entryID.slice(PLATFORM.length + 1)}`,
+      creatorID: entry.sourceID || `${PLATFORM}:collab:${entry.entryID.slice(entry.entryID.lastIndexOf(":") + 1)}`,
       title: entry.evidence.title, entryType: entry.evidence.metadata.entryType,
       root: card, anchor: selectorElement(card, entry.evidence.metadata.entryType === "post"
         ? ["#content-text", "#content #content-text"] : TITLE_SELECTORS) || source.link || null

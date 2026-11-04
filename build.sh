@@ -14,6 +14,18 @@ OUT_DIR="$ROOT/extension"
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 unzip -q "$ZIP" -d "$OUT_DIR"
+# Native containing-app strings belong to Safari, not the shared browser
+# package. Merge them after regeneration so future shared UI syncs retain them.
+python3 - "$ROOT/Assets/native-translation.json" "$OUT_DIR/translation" <<'PY'
+import json, pathlib, sys
+native = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+directory = pathlib.Path(sys.argv[2])
+for locale, strings in native.items():
+    path = directory / (locale + '.json')
+    catalog = json.loads(path.read_text(encoding='utf-8'))
+    catalog.update(strings)
+    path.write_text(json.dumps(catalog, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
 # Platform branding stays local even when shared browser code is regenerated.
 cp "$ROOT/Assets/Branding/BrowserIcons/"*.{png,svg} "$OUT_DIR/icons/"
 echo "[safariBlocker] generated $ENVIRONMENT browser assets -> $OUT_DIR"

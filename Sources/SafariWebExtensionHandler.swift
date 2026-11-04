@@ -140,6 +140,8 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             }
             guard !fence.expired else { return }
             fence.finish(["ok": true, "result": result])
+        } catch SafariRuntimeError.unsupportedJournal {
+            fence.finish(["ok": false, "error": "Vault cannot read this rule journal. Saved data was preserved; update Vault or restore a compatible backup."])
         } catch { fence.finish(["ok": false, "error": "Safari's native rule engine could not complete this request."]) }
     }
     private static func respond(_ context: NSExtensionContext, _ value: [String: Any]) {

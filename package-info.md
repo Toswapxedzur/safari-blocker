@@ -12,7 +12,10 @@ Read the group `AGENTS.md` and `../misc/project-memory/PROJECT-MEMORY.md` before
 
 Shared editor assets preserve current accepted translations, growing scrollable lists, per-group `v.log` logs, floating menus, and localized Info explanations for the fixed20 app languages. Custom-rule engine errors remain developer diagnostics rather than rule logs.
 
-- `Assets/Branding/`: selected Safari 05 compass vector, native ICNS/master, and browser aliases. `build.sh` overlays these after generating shared assets; the native build embeds SafariVault.icns.
+- `Assets/Branding/`: bright Safari compass vector, native ICNS/master, and
+  browser aliases; `safari-vault-dark.svg` is retained for the website.
+  `build.sh` overlays bright browser icons after generating shared assets; the
+  native build embeds the bright SafariVault.icns.
 
 - `VERSIONS.md`: owner-approved 2026-10-04 capability split; current candidate version **3.2.0 alpha**. Historical tags/packages remain immutable.
 

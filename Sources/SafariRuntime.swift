@@ -56,14 +56,21 @@ final class SafariRuleJournal {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         url = directory.appendingPathComponent("rules-" + SafariConfiguration.profileKey(profile) + ".json")
-        if let data = try? Data(contentsOf: url), data.count <= 16 * 1024 * 1024,
-           let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           value["version"] as? Int == 1 {
-            groups = value["groups"] as? [String: [String: Any]] ?? [:]
-            quarantine = value["quarantine"] as? [String: String] ?? [:]
-            quarantinedSources = value["quarantinedSources"] as? [String: String] ?? [:]
-            // A malformed old journal is a bounded crash guard, never code.
-            groups = groups.filter { !$0.key.isEmpty && $0.key.utf8.count <= 256 && (($0.value["source"] as? String)?.utf8.count ?? Int.max) <= 4 * 1024 * 1024 }
+        if FileManager.default.fileExists(atPath: url.path) {
+            let data = try Data(contentsOf: url)
+            guard data.count <= 16 * 1024 * 1024,
+                  let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  value["version"] as? Int == 1,
+                  let savedGroups = value["groups"] as? [String: [String: Any]],
+                  let savedQuarantine = value["quarantine"] as? [String: String],
+                  let savedSources = value["quarantinedSources"] as? [String: String],
+                  savedGroups.allSatisfy({ !$0.key.isEmpty && $0.key.utf8.count <= 256
+                      && (($0.value["source"] as? String)?.utf8.count ?? Int.max) <= 4 * 1024 * 1024 }) else {
+                throw SafariRuntimeError.unsupportedJournal
+            }
+            groups = savedGroups
+            quarantine = savedQuarantine
+            quarantinedSources = savedSources
         }
     }
     private let lock = NSRecursiveLock()
@@ -138,7 +145,7 @@ final class SafariRuleJournal {
     }
 }
 
-enum SafariRuntimeError: Error { case missingResources, engineUnavailable, invalidRequest, invalidReply }
+enum SafariRuntimeError: Error { case missingResources, engineUnavailable, invalidRequest, invalidReply, unsupportedJournal }
 
 /// Runs the canonical engine in Safari's isolated native extension process.
 /// There are no DOM/network/timer/file bridges available to JavaScript. Native

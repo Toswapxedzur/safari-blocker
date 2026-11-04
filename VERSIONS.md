@@ -2,7 +2,11 @@
 
 The owner approved this capability split on 2026-10-04. Existing tags and packaged downloads remain unchanged. All new records are **alpha, source-only**. A source record does not certify store submission, signing or native release acceptance.
 
-Current candidate version: **3.2.0**. See the group-level `CHANGELOG.md` for the cross-product chapters.
+Current private candidate: **4.0.1, Beta 1**. Publication and installed-package acceptance remain pending. See the group-level `CHANGELOG.md` for the cross-product chapter.
+
+## 4.0.1 — 2026-11-04 — Beta 1 candidate
+
+The containing app and extension share 4.0.1. Includes the accepted custom-rule, tagging, Snooze, naming, locale, update, and bright icon changes. Native Safari strings survive shared browser-asset regeneration. An unsupported rule journal is preserved and refused. The first public Beta 1 package begins the rolling 30-day direct-upgrade guarantee.
 
 ## 3.2.0 — 2026-10-29 — AI and generic content rules
 

@@ -100,6 +100,19 @@ let coldResult = try cold.handle(tick)
 check((coldResult["states"] as? [String: [String: Any]])?["one"]?["visits"] as? Int == 12, "cold native restart restores committed state")
 let other = try SafariRuleJournal(directory: directory, profile: "two")
 check(other.groups.isEmpty && other.url != journal.url, "profile journals isolated")
+for (profile, bytes) in [
+    ("future", Data(#"{"version":2,"groups":{"keep":{"source":"on"}},"quarantine":{},"quarantinedSources":{}}"#.utf8)),
+    ("malformed", Data(#"{"version":1,"groups":"unreadable"}"#.utf8))
+] {
+    let journalURL = directory.appendingPathComponent("rules-" + SafariConfiguration.profileKey(profile) + ".json")
+    try bytes.write(to: journalURL)
+    do {
+        _ = try SafariRuleJournal(directory: directory, profile: profile)
+        check(false, "unsupported rule journal is refused")
+    } catch {
+        check((try? Data(contentsOf: journalURL)) == bytes, "unsupported rule journal bytes survive refusal")
+    }
+}
 _ = try cold.handle(["kind": "load-source", "groupId": "error", "source": "(on,v)=>on('tick',()=>{throw new Error('diagnostic')})", "state": [:]])
 let errorResult = try cold.handle(tick)
 check((errorResult["logs"] as? [[String: Any]])?.contains(where: { $0["groupId"] as? String == "error" }) == false, "runtime errors excluded from rule logs")

@@ -1,0 +1,122 @@
+{
+  "en": {
+    "safari.setup.minimumVersion": "Vault requires Safari 18.4 or later. Update Safari to enable the extension.",
+    "safari.updates.settings": "Settings…",
+    "safari.updates.auto": "Auto install updates",
+    "safari.updates.check": "Check for updates"
+  },
+  "ar": {
+    "safari.setup.minimumVersion": "يتطلب Vault Safari 18.4 أو أحدث. حدّث Safari لتفعيل الإضافة.",
+    "safari.updates.settings": "الإعدادات…",
+    "safari.updates.auto": "تثبيت التحديثات تلقائيًا",
+    "safari.updates.check": "التحقق من وجود تحديثات"
+  },
+  "bn": {
+    "safari.setup.minimumVersion": "Vault-এর জন্য Safari 18.4 বা পরবর্তী সংস্করণ প্রয়োজন। এক্সটেনশন চালু করতে Safari আপডেট করুন।",
+    "safari.updates.settings": "সেটিংস…",
+    "safari.updates.auto": "স্বয়ংক্রিয়ভাবে আপডেট ইনস্টল করুন",
+    "safari.updates.check": "আপডেট খুঁজুন"
+  },
+  "de": {
+    "safari.setup.minimumVersion": "Vault erfordert Safari 18.4 oder neuer. Aktualisiere Safari, um die Erweiterung zu aktivieren.",
+    "safari.updates.settings": "Einstellungen…",
+    "safari.updates.auto": "Updates automatisch installieren",
+    "safari.updates.check": "Nach Updates suchen"
+  },
+  "es": {
+    "safari.setup.minimumVersion": "Vault requiere Safari 18.4 o posterior. Actualiza Safari para activar la extensión.",
+    "safari.updates.settings": "Ajustes…",
+    "safari.updates.auto": "Instalar actualizaciones automáticamente",
+    "safari.updates.check": "Buscar actualizaciones"
+  },
+  "fr": {
+    "safari.setup.minimumVersion": "Vault nécessite Safari 18.4 ou ultérieur. Mettez Safari à jour pour activer l’extension.",
+    "safari.updates.settings": "Réglages…",
+    "safari.updates.auto": "Installer automatiquement les mises à jour",
+    "safari.updates.check": "Rechercher des mises à jour"
+  },
+  "hi": {
+    "safari.setup.minimumVersion": "Vault के लिए Safari 18.4 या नया संस्करण आवश्यक है। एक्सटेंशन चालू करने के लिए Safari अपडेट करें।",
+    "safari.updates.settings": "सेटिंग…",
+    "safari.updates.auto": "अपडेट अपने-आप इंस्टॉल करें",
+    "safari.updates.check": "अपडेट की जाँच करें"
+  },
+  "id": {
+    "safari.setup.minimumVersion": "Vault memerlukan Safari 18.4 atau versi lebih baru. Perbarui Safari untuk mengaktifkan ekstensi.",
+    "safari.updates.settings": "Pengaturan…",
+    "safari.updates.auto": "Instal pembaruan otomatis",
+    "safari.updates.check": "Periksa pembaruan"
+  },
+  "it": {
+    "safari.setup.minimumVersion": "Vault richiede Safari 18.4 o versioni successive. Aggiorna Safari per abilitare l’estensione.",
+    "safari.updates.settings": "Impostazioni…",
+    "safari.updates.auto": "Installa automaticamente gli aggiornamenti",
+    "safari.updates.check": "Verifica aggiornamenti"
+  },
+  "ja": {
+    "safari.setup.minimumVersion": "VaultにはSafari 18.4以降が必要です。機能拡張を有効にするにはSafariをアップデートしてください。",
+    "safari.updates.settings": "設定…",
+    "safari.updates.auto": "アップデートを自動でインストール",
+    "safari.updates.check": "アップデートを確認"
+  },
+  "ko": {
+    "safari.setup.minimumVersion": "Vault를 사용하려면 Safari 18.4 이상이 필요합니다. 확장 프로그램을 활성화하려면 Safari를 업데이트하세요.",
+    "safari.updates.settings": "설정…",
+    "safari.updates.auto": "업데이트 자동 설치",
+    "safari.updates.check": "업데이트 확인"
+  },
+  "nl": {
+    "safari.setup.minimumVersion": "Vault vereist Safari 18.4 of nieuwer. Werk Safari bij om de extensie in te schakelen.",
+    "safari.updates.settings": "Instellingen…",
+    "safari.updates.auto": "Updates automatisch installeren",
+    "safari.updates.check": "Controleren op updates"
+  },
+  "pa": {
+    "safari.setup.minimumVersion": "Vault ਲਈ Safari 18.4 ਜਾਂ ਇਸ ਤੋਂ ਨਵਾਂ ਵਰਜਨ ਲੋੜੀਂਦਾ ਹੈ। ਐਕਸਟੈਂਸ਼ਨ ਚਾਲੂ ਕਰਨ ਲਈ Safari ਅੱਪਡੇਟ ਕਰੋ।",
+    "safari.updates.settings": "ਸੈਟਿੰਗਾਂ…",
+    "safari.updates.auto": "ਅੱਪਡੇਟ ਆਪਣੇ ਆਪ ਇੰਸਟਾਲ ਕਰੋ",
+    "safari.updates.check": "ਅੱਪਡੇਟਾਂ ਲਈ ਜਾਂਚ ਕਰੋ"
+  },
+  "pl": {
+    "safari.setup.minimumVersion": "Vault wymaga Safari 18.4 lub nowszej wersji. Uaktualnij Safari, aby włączyć rozszerzenie.",
+    "safari.updates.settings": "Ustawienia…",
+    "safari.updates.auto": "Automatycznie instaluj aktualizacje",
+    "safari.updates.check": "Sprawdź dostępność aktualizacji"
+  },
+  "pt": {
+    "safari.setup.minimumVersion": "O Vault requer o Safari 18.4 ou posterior. Atualize o Safari para ativar a extensão.",
+    "safari.updates.settings": "Ajustes…",
+    "safari.updates.auto": "Instalar atualizações automaticamente",
+    "safari.updates.check": "Verificar atualizações"
+  },
+  "ru": {
+    "safari.setup.minimumVersion": "Для Vault требуется Safari 18.4 или новее. Обновите Safari, чтобы включить расширение.",
+    "safari.updates.settings": "Настройки…",
+    "safari.updates.auto": "Автоматически устанавливать обновления",
+    "safari.updates.check": "Проверить наличие обновлений"
+  },
+  "th": {
+    "safari.setup.minimumVersion": "Vault ต้องใช้ Safari 18.4 หรือใหม่กว่า อัปเดต Safari เพื่อเปิดใช้ส่วนขยาย",
+    "safari.updates.settings": "การตั้งค่า…",
+    "safari.updates.auto": "ติดตั้งการอัปเดตอัตโนมัติ",
+    "safari.updates.check": "ตรวจหาการอัปเดต"
+  },
+  "tr": {
+    "safari.setup.minimumVersion": "Vault için Safari 18.4 veya daha yenisi gerekir. Uzantıyı etkinleştirmek için Safari’yi güncelleyin.",
+    "safari.updates.settings": "Ayarlar…",
+    "safari.updates.auto": "Güncellemeleri otomatik yükle",
+    "safari.updates.check": "Güncellemeleri denetle"
+  },
+  "vi": {
+    "safari.setup.minimumVersion": "Vault yêu cầu Safari 18.4 trở lên. Hãy cập nhật Safari để bật tiện ích mở rộng.",
+    "safari.updates.settings": "Cài đặt…",
+    "safari.updates.auto": "Tự động cài đặt bản cập nhật",
+    "safari.updates.check": "Kiểm tra bản cập nhật"
+  },
+  "zh": {
+    "safari.setup.minimumVersion": "Vault 需要 Safari 18.4 或更高版本。请更新 Safari 以启用扩展。",
+    "safari.updates.settings": "设置…",
+    "safari.updates.auto": "自动安装更新",
+    "safari.updates.check": "检查更新"
+  }
+}

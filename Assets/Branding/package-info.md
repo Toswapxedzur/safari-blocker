@@ -1,3 +1,8 @@
-# Safari 05 branding
+# Safari Vault branding
 
-Selected normal vector and gradient symbol use the approved 110% shared shield. Masters, native containers and BrowserIcons are generated on mini1 by customBlocker/tools/generate_icons.py; edit the canonical selected vector there, then regenerate. The inverse companion preserves dark-toolbar contrast.
+`safari-vault.svg`, the master PNG and native ICNS are the bright app icon.
+`safari-vault-dark.svg` preserves the exact dark website artwork. All generated
+browser and inverse-name aliases use the bright palette and no visible tile
+outline. Generate on Mini2 from the canonical
+`customBlocker/tools/branding/safari/safari-vault.svg` with
+`customBlocker/tools/generate_icons.py`.
