@@ -123,6 +123,7 @@ if [ "$IDENTITY" != - ]; then
   EXTENSION_ENTITLEMENTS="$OUT/SafariVaultExtension.appex.entitlements"
 fi
 SIGN_FLAGS=(--force --sign "$IDENTITY")
+if [ -n "${SAFARI_VAULT_SIGNING_KEYCHAIN:-}" ]; then SIGN_FLAGS+=(--keychain "$SAFARI_VAULT_SIGNING_KEYCHAIN"); fi
 if [ "$IDENTITY" != - ]; then SIGN_FLAGS+=(--options runtime --timestamp); fi
 codesign "${SIGN_FLAGS[@]}" "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"
 codesign "${SIGN_FLAGS[@]}" --preserve-metadata=entitlements "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc"
