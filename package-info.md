@@ -10,7 +10,7 @@ Read the group `AGENTS.md` and `../misc/project-memory/PROJECT-MEMORY.md` before
 - `README.md` explains build, onboarding, independent rules, authentication, and verification limits.
 - Public version follows `customBlocker/manifest.safari.json`; this branch packages the 3.2.0 candidate from browser commit `54ae7ee` plus its version and localization work. Public publication remains a separate gate.
 
-Shared editor assets preserve current accepted translations, growing scrollable lists, per-group `v.log` logs, floating menus, and localized Info explanations for the fixed20 app languages. Custom-rule engine errors remain developer diagnostics rather than rule logs.
+Shared editor assets preserve current accepted translations, growing scrollable lists, per-group `v.log` logs, floating menus, and localized Info explanations for the fixed20 app languages. Rule logs now persist in the browser profile across restarts, keeping 200 per group and 2 MiB total; Clear and group deletion remove them. Custom-rule engine errors remain developer diagnostics rather than rule logs.
 
 - `Assets/Branding/`: bright Safari compass vector, native ICNS/master, and
   browser aliases; `safari-vault-dark.svg` is retained for the website.
